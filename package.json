@@ -1,0 +1,10 @@
+{
+  "name": "loopbrake",
+  "version": "0.1.0",
+  "description": "Zero-dependency auditor that flags coding agents which patch the same source file again and again instead of fixing the root cause.",
+  "type": "module",
+  "main": "./src/analyzer.mjs",
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
