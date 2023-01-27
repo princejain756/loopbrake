@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 
 const EDIT_TOOLS = new Set(["Edit", "MultiEdit", "Write"]);
+const THRASH_THRESHOLD = 4;
 
 // Walk a Claude Code transcript and record every source-file mutation together
 // with the tool that made it. A transcript is JSONL: one event per line.
@@ -45,4 +46,28 @@ export function rankByMutations(mutations) {
   return [...mutations.entries()]
     .map(([file, methods]) => ({ file, edits: methods.length, methods: [...new Set(methods)] }))
     .sort((a, b) => b.edits - a.edits || a.file.localeCompare(b.file));
+}
+
+// Four mutations on one file means the agent kept guessing. Report each thrashing
+// file once, with the tools it used, so the reason is legible without rerunning.
+export function findThrashing(filePath) {
+  const sessionLabel = path.basename(filePath);
+  const ranked = rankByMutations(collectMutations(filePath));
+  const findings = [];
+  const thrashedFiles = [];
+
+  for (const entry of ranked) {
+    if (entry.edits < THRASH_THRESHOLD) continue;
+    thrashedFiles.push(entry);
+    findings.push({
+      ruleId: "LPB001",
+      plane: "thrash",
+      severity: "CRITICAL",
+      file: sessionLabel,
+      detail: `${entry.file} mutated ${entry.edits} times in ${sessionLabel} via ${entry.methods.join(", ")}`,
+      evidence: `${entry.file}: ${entry.edits} mutations`
+    });
+  }
+
+  return { sessionLabel, findings, thrashedFiles, editCalls: totalEdits(ranked) };
 }
