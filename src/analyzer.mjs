@@ -71,3 +71,65 @@ export function findThrashing(filePath) {
 
   return { sessionLabel, findings, thrashedFiles, editCalls: totalEdits(ranked) };
 }
+
+function totalEdits(ranked) {
+  return ranked.reduce((sum, entry) => sum + entry.edits, 0);
+}
+
+function collectJsonlFiles(dir, out = []) {
+  if (!fs.existsSync(dir)) return out;
+  try {
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) collectJsonlFiles(full, out);
+      else if (entry.isFile() && entry.name.endsWith(".jsonl")) out.push(full);
+    }
+  } catch {
+    // unreadable directory: keep whatever was collected so far
+  }
+  return out;
+}
+
+// Accept explicit paths, or fall back to the default Claude Code log directory.
+export function resolveTranscriptFiles(targets) {
+  const found = [];
+  for (const target of targets) {
+    if (!fs.existsSync(target)) continue;
+    const st = fs.statSync(target);
+    if (st.isDirectory()) collectJsonlFiles(target, found);
+    else if (st.isFile() && target.endsWith(".jsonl")) found.push(target);
+  }
+  return found;
+}
+
+export function auditAgentLoops(paths = defaultPaths()) {
+  const transcriptFiles = resolveTranscriptFiles(Array.isArray(paths) ? paths : defaultPaths());
+
+  const findings = [];
+  const thrashedFiles = [];
+  let editCalls = 0;
+
+  for (const tf of transcriptFiles) {
+    try {
+      const res = findThrashing(tf);
+      findings.push(...res.findings);
+      editCalls += res.editCalls;
+      for (const item of res.thrashedFiles) {
+        thrashedFiles.push({ session: res.sessionLabel, ...item });
+      }
+    } catch {
+      // ignore unreadable transcript
+    }
+  }
+
+  return {
+    sessionsScanned: transcriptFiles.length,
+    editCalls,
+    thrashedFiles: thrashedFiles.sort((a, b) => b.edits - a.edits),
+    findings
+  };
+}
+
+function defaultPaths() {
+  return [path.join(process.env.HOME || ".", ".claude", "projects")];
+}
