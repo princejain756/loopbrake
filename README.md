@@ -29,3 +29,12 @@ Each line of output is one thrashing file with the tools that touched it:
 
 ```js
 import { collectMutations, rankByMutations } from './src/analyzer.mjs';
+
+for (const { file, edits, methods } of rankByMutations(collectMutations('session.jsonl'))) {
+  console.log(`${edits}x ${file} via ${methods.join(', ')}`);
+}
+```
+
+`Edit` and `Write` count as one mutation each, and a `MultiEdit` counts as one
+mutation per hunk it carries, so a single call that rewrites five regions ranks
+above five separate one-line patches.
