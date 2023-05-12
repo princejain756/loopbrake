@@ -50,30 +50,32 @@ export function rankByMutations(mutations) {
 
 // Four mutations on one file means the agent kept guessing. Report each thrashing
 // file once, with the tools it used, so the reason is legible without rerunning.
-export function findThrashing(filePath) {
+export function analyzeSessionTranscript(filePath) {
   const sessionLabel = path.basename(filePath);
   const ranked = rankByMutations(collectMutations(filePath));
   const findings = [];
   const thrashedFiles = [];
+  const severityCounts = { CRITICAL: 0, HIGH: 0, MEDIUM: 0, LOW: 0, INFO: 0 };
+  let structuredEditCalls = 0;
 
   for (const entry of ranked) {
+    structuredEditCalls += entry.edits;
     if (entry.edits < THRASH_THRESHOLD) continue;
     thrashedFiles.push(entry);
-    findings.push({
+
+    const finding = {
       ruleId: "LPB001",
       plane: "thrash",
       severity: "CRITICAL",
       file: sessionLabel,
       detail: `${entry.file} mutated ${entry.edits} times in ${sessionLabel} via ${entry.methods.join(", ")}`,
       evidence: `${entry.file}: ${entry.edits} mutations`
-    });
+    };
+    findings.push(finding);
+    severityCounts[finding.severity]++;
   }
 
-  return { sessionLabel, findings, thrashedFiles, editCalls: totalEdits(ranked) };
-}
-
-function totalEdits(ranked) {
-  return ranked.reduce((sum, entry) => sum + entry.edits, 0);
+  return { findings, severityCounts, structuredEditCalls, thrashedFiles };
 }
 
 function collectJsonlFiles(dir, out = []) {
@@ -102,34 +104,48 @@ export function resolveTranscriptFiles(targets) {
   return found;
 }
 
+function defaultPaths() {
+  return [path.join(process.env.HOME || ".", ".claude", "projects")];
+}
+
 export function auditAgentLoops(paths = defaultPaths()) {
   const transcriptFiles = resolveTranscriptFiles(Array.isArray(paths) ? paths : defaultPaths());
 
   const findings = [];
   const thrashedFiles = [];
-  let editCalls = 0;
+  const ruleCounts = {};
+  const severityCounts = { CRITICAL: 0, HIGH: 0, MEDIUM: 0, LOW: 0, INFO: 0 };
+  let structuredEditCalls = 0;
 
   for (const tf of transcriptFiles) {
     try {
-      const res = findThrashing(tf);
+      const res = analyzeSessionTranscript(tf);
       findings.push(...res.findings);
-      editCalls += res.editCalls;
+      structuredEditCalls += res.structuredEditCalls;
+      for (const sev of Object.keys(severityCounts)) {
+        severityCounts[sev] += res.severityCounts[sev];
+      }
       for (const item of res.thrashedFiles) {
-        thrashedFiles.push({ session: res.sessionLabel, ...item });
+        thrashedFiles.push({ session: path.basename(tf), ...item });
       }
     } catch {
       // ignore unreadable transcript
     }
   }
 
+  for (const f of findings) {
+    ruleCounts[f.ruleId] = (ruleCounts[f.ruleId] || 0) + 1;
+  }
+
   return {
     sessionsScanned: transcriptFiles.length,
-    editCalls,
+    severityCounts,
+    ruleCounts,
+    metrics: {
+      structuredEditCalls,
+      thrashedFileCount: thrashedFiles.length
+    },
     thrashedFiles: thrashedFiles.sort((a, b) => b.edits - a.edits),
     findings
   };
-}
-
-function defaultPaths() {
-  return [path.join(process.env.HOME || ".", ".claude", "projects")];
 }
