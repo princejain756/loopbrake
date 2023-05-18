@@ -4,14 +4,19 @@ import { auditAgentLoops } from '../src/analyzer.mjs';
 const report = auditAgentLoops(process.argv.slice(2));
 
 console.log(`loopbrake: scanned ${report.sessionsScanned} session(s)`);
-console.log(`edit calls: ${report.editCalls}`);
-console.log(`thrashed source files: ${report.thrashedFiles.length}`);
+console.log(`structured edit calls: ${report.metrics.structuredEditCalls}`);
+console.log(`thrashed source files: ${report.metrics.thrashedFileCount}`);
 console.log('');
 
-if (report.thrashedFiles.length === 0) {
+for (const tf of report.thrashedFiles) {
+  console.log(`${tf.edits}x ${tf.file} (${tf.session}) via ${tf.methods.join(', ')}`);
+}
+
+if (report.findings.length === 0) {
   console.log('No edit thrashing found.');
 } else {
-  for (const tf of report.thrashedFiles) {
-    console.log(`${tf.edits}x ${tf.file} (${tf.session}) via ${tf.methods.join(', ')}`);
+  console.log('');
+  for (const f of report.findings) {
+    console.log(`${f.severity} ${f.ruleId} ${f.file}: ${f.detail}`);
   }
 }
