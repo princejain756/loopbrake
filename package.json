@@ -7,6 +7,9 @@
     "loopbrake": "./bin/loopbrake.mjs"
   },
   "main": "./src/analyzer.mjs",
+  "scripts": {
+    "test": "node --test tests/loopbrake.test.mjs"
+  },
   "engines": {
     "node": ">=18.0.0"
   },
