@@ -1,16 +1,28 @@
 import fs from "node:fs";
 import path from "node:path";
+import os from "node:os";
 
-const EDIT_TOOLS = new Set(["Edit", "MultiEdit", "Write"]);
-const THRASH_THRESHOLD = 4;
+const SOURCE_FILE_RE = /\b([a-zA-Z0-9_.-]+\.(?:py|mjs|cjs|js|ts|tsx|jsx|rs|go|java|c|cpp|h|rb|php|swift|kt|sql|sh|css|html|vue|svelte))\b/g;
+const DOC_OR_MANIFEST_RE = /^(?:README\.md|CHANGELOG\.md|LICENSE|package\.json|package-lock\.json|pnpm-lock\.yaml|Cargo\.toml|Cargo\.lock|pyproject\.toml)$/i;
 
-// Walk a Claude Code transcript and record every source-file mutation together
-// with the tool that made it. A transcript is JSONL: one event per line.
-export function collectMutations(filePath) {
-  const mutations = new Map();
+export function extractTargetSourceFiles(cmd) {
+  const s = String(cmd || "");
+  const matches = [...s.matchAll(SOURCE_FILE_RE)].map((m) => path.basename(m[1]));
+  return [...new Set(matches)].filter((f) => !DOC_OR_MANIFEST_RE.test(f));
+}
+
+export function analyzeSessionTranscript(filePath) {
+  const findings = [];
+  const sessionLabel = path.basename(filePath);
+
+  let structuredEditCalls = 0;
+  let docManifestFilteredCount = 0;
+  const fileMutations = new Map();
+
   const content = fs.readFileSync(filePath, "utf8");
+  const lines = content.split("\n");
 
-  for (const line of content.split("\n")) {
+  for (const line of lines) {
     if (!line.trim()) continue;
     let obj;
     try {
@@ -18,64 +30,66 @@ export function collectMutations(filePath) {
     } catch {
       continue;
     }
-    if (obj?.type !== "assistant" || !Array.isArray(obj?.message?.content)) continue;
 
-    for (const blk of obj.message.content) {
-      if (blk?.type !== "tool_use") continue;
-      const name = String(blk.name || "");
-      if (!EDIT_TOOLS.has(name)) continue;
+    if (obj?.type === "assistant" && Array.isArray(obj?.message?.content)) {
+      for (const blk of obj.message.content) {
+        if (blk?.type !== "tool_use") continue;
+        const name = String(blk.name || "");
+        if (!["Edit", "MultiEdit", "Write"].includes(name)) continue;
 
-      const input = blk.input || {};
-      const target = path.basename(String(input.file_path || input.path || ""));
-      if (!target) continue;
+        const input = blk.input || {};
+        const fp = path.basename(String(input.file_path || input.path || "unknown"));
+        // End-of-task README/package.json churn is expected, not thrashing.
+        if (DOC_OR_MANIFEST_RE.test(fp)) {
+          docManifestFilteredCount++;
+          continue;
+        }
+        structuredEditCalls++;
 
-      // A MultiEdit is one call but several hunks against the same file.
-      const hunks = name === "MultiEdit" && Array.isArray(input.edits) ? input.edits.length : 1;
-      for (let i = 0; i < hunks; i++) {
-        if (!mutations.has(target)) mutations.set(target, []);
-        mutations.get(target).push(name);
+        if (!fileMutations.has(fp)) fileMutations.set(fp, []);
+        const edits =
+          name === "MultiEdit" && Array.isArray(input.edits)
+            ? input.edits
+            : [{ old_string: input.old_string || "", new_string: input.new_string || input.content || "" }];
+        for (const ed of edits) {
+          fileMutations.get(fp).push({
+            method: name,
+            oldStr: String(ed.old_string || ""),
+            newStr: String(ed.new_string || "")
+          });
+        }
       }
     }
   }
 
-  return mutations;
-}
-
-// Most-mutated files first, so the top of the list is where to start reading.
-export function rankByMutations(mutations) {
-  return [...mutations.entries()]
-    .map(([file, methods]) => ({ file, edits: methods.length, methods: [...new Set(methods)] }))
-    .sort((a, b) => b.edits - a.edits || a.file.localeCompare(b.file));
-}
-
-// Four mutations on one file means the agent kept guessing. Report each thrashing
-// file once, with the tools it used, so the reason is legible without rerunning.
-export function analyzeSessionTranscript(filePath) {
-  const sessionLabel = path.basename(filePath);
-  const ranked = rankByMutations(collectMutations(filePath));
-  const findings = [];
+  // Same-file edit thrashing. Four mutations is a redesign; three is already a band-aid.
   const thrashedFiles = [];
-  const severityCounts = { CRITICAL: 0, HIGH: 0, MEDIUM: 0, LOW: 0, INFO: 0 };
-  let structuredEditCalls = 0;
-
-  for (const entry of ranked) {
-    structuredEditCalls += entry.edits;
-    if (entry.edits < THRASH_THRESHOLD) continue;
-    thrashedFiles.push(entry);
-
-    const finding = {
-      ruleId: "LPB001",
-      plane: "thrash",
-      severity: "CRITICAL",
-      file: sessionLabel,
-      detail: `${entry.file} mutated ${entry.edits} times in ${sessionLabel} via ${entry.methods.join(", ")}`,
-      evidence: `${entry.file}: ${entry.edits} mutations`
-    };
-    findings.push(finding);
-    severityCounts[finding.severity]++;
+  for (const [fp, list] of fileMutations.entries()) {
+    if (list.length < 3) continue;
+    const methods = [...new Set(list.map((x) => x.method))];
+    thrashedFiles.push({ file: fp, edits: list.length, methods });
+    if (list.length >= 4) {
+      findings.push({
+        ruleId: "LPB001",
+        plane: "thrash",
+        severity: "CRITICAL",
+        file: sessionLabel,
+        detail: `${fp} mutated ${list.length} times in ${sessionLabel} via ${methods.join(", ")}`,
+        evidence: `${fp}: ${list.length} mutations`
+      });
+    } else {
+      findings.push({
+        ruleId: "LPB002",
+        plane: "thrash",
+        severity: "HIGH",
+        file: sessionLabel,
+        detail: `${fp} patched 3 times in ${sessionLabel} via ${methods.join(", ")} (band-aid threshold)`,
+        evidence: `${fp}: 3 mutations`
+      });
+    }
   }
 
-  return { findings, severityCounts, structuredEditCalls, thrashedFiles };
+  return { findings, structuredEditCalls, docManifestFilteredCount, thrashedFiles };
 }
 
 function collectJsonlFiles(dir, out = []) {
@@ -92,49 +106,57 @@ function collectJsonlFiles(dir, out = []) {
   return out;
 }
 
-// Accept explicit paths, or fall back to the default Claude Code log directory.
-export function resolveTranscriptFiles(targets) {
-  const found = [];
-  for (const target of targets) {
-    if (!fs.existsSync(target)) continue;
-    const st = fs.statSync(target);
-    if (st.isDirectory()) collectJsonlFiles(target, found);
-    else if (st.isFile() && target.endsWith(".jsonl")) found.push(target);
+export function auditAgentLoops(options = {}) {
+  let transcriptFiles;
+  if (Array.isArray(options)) {
+    transcriptFiles = [];
+    for (const p of options) {
+      if (!fs.existsSync(p)) continue;
+      const st = fs.statSync(p);
+      if (st.isDirectory()) collectJsonlFiles(p, transcriptFiles);
+      else if (st.isFile() && p.endsWith(".jsonl")) transcriptFiles.push(p);
+    }
+  } else {
+    const home = options.homeDir || os.homedir();
+    transcriptFiles =
+      options.transcriptFiles || collectJsonlFiles(path.join(home, ".claude", "projects"));
   }
-  return found;
-}
 
-function defaultPaths() {
-  return [path.join(process.env.HOME || ".", ".claude", "projects")];
-}
-
-export function auditAgentLoops(paths = defaultPaths()) {
-  const transcriptFiles = resolveTranscriptFiles(Array.isArray(paths) ? paths : defaultPaths());
-
-  const findings = [];
-  const thrashedFiles = [];
-  const ruleCounts = {};
-  const severityCounts = { CRITICAL: 0, HIGH: 0, MEDIUM: 0, LOW: 0, INFO: 0 };
+  const allFindings = [];
   let structuredEditCalls = 0;
+  let docManifestFilteredCount = 0;
+  const allThrashedFiles = [];
 
   for (const tf of transcriptFiles) {
     try {
       const res = analyzeSessionTranscript(tf);
-      findings.push(...res.findings);
+      allFindings.push(...res.findings);
       structuredEditCalls += res.structuredEditCalls;
-      for (const sev of Object.keys(severityCounts)) {
-        severityCounts[sev] += res.severityCounts[sev];
-      }
+      docManifestFilteredCount += res.docManifestFilteredCount;
       for (const item of res.thrashedFiles) {
-        thrashedFiles.push({ session: path.basename(tf), ...item });
+        allThrashedFiles.push({ session: path.basename(tf), ...item });
       }
     } catch {
       // ignore unreadable transcript
     }
   }
 
-  for (const f of findings) {
+  if (docManifestFilteredCount > 0) {
+    allFindings.push({
+      ruleId: "LPB007",
+      plane: "thrash",
+      severity: "INFO",
+      file: "session-transcripts",
+      detail: `${docManifestFilteredCount} doc/manifest edit(s) excluded from source thrash counts`,
+      evidence: `${docManifestFilteredCount} doc/manifest updates`
+    });
+  }
+
+  const ruleCounts = {};
+  const severityCounts = { CRITICAL: 0, HIGH: 0, MEDIUM: 0, LOW: 0, INFO: 0 };
+  for (const f of allFindings) {
     ruleCounts[f.ruleId] = (ruleCounts[f.ruleId] || 0) + 1;
+    severityCounts[f.severity] = (severityCounts[f.severity] || 0) + 1;
   }
 
   return {
@@ -143,9 +165,10 @@ export function auditAgentLoops(paths = defaultPaths()) {
     ruleCounts,
     metrics: {
       structuredEditCalls,
-      thrashedFileCount: thrashedFiles.length
+      docManifestFilteredCount,
+      thrashedFileCount: allThrashedFiles.length
     },
-    thrashedFiles: thrashedFiles.sort((a, b) => b.edits - a.edits),
-    findings
+    thrashedFiles: allThrashedFiles.sort((a, b) => b.edits - a.edits),
+    findings: allFindings
   };
 }
