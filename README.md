@@ -38,3 +38,14 @@ for (const { file, edits, methods } of rankByMutations(collectMutations('session
 `Edit` and `Write` count as one mutation each, and a `MultiEdit` counts as one
 mutation per hunk it carries, so a single call that rewrites five regions ranks
 above five separate one-line patches.
+
+## Detection rules
+
+| Rule | Severity | What it flags |
+| :--- | :--- | :--- |
+| `LPB001` | `CRITICAL` | 4+ mutations to one source file in a single session |
+| `LPB002` | `HIGH` | 3 mutations to one source file (band-aid threshold) |
+| `LPB007` | `INFO` | `README.md` / `package.json` churn excluded from thrash counts |
+
+End-of-task `README.md` and `package.json` updates are normal, so they are
+filtered out of the per-file counts instead of inflating them.
