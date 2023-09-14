@@ -3,49 +3,24 @@
 Detect and break coding-agent edit-thrashing.
 
 A coding agent that cannot fix a bug will patch the same file over and over
-instead of stepping back and redesigning the module. `loopbrake` reads Claude Code
-transcripts (`.jsonl`, one event object per line) and reports every source file an
-agent mutated four or more times in a single session, so the band-aid turns are
-visible after the fact.
+instead of stepping back and redesigning the module. `loopbrake` reads local
+Claude Code transcripts (`~/.claude/projects/*.jsonl`) and reports every source
+file that an agent mutated four or more times in a single session, so the band-aid
+turns are visible after the fact.
 
 ## Usage
 
 ```bash
-# Scan the default ~/.claude/projects log directory
+# Audit the default Claude Code transcript directory
 node ./bin/loopbrake.mjs
 
-# Scan an explicit directory or single transcript
+# Audit an explicit directory of .jsonl transcripts
 node ./bin/loopbrake.mjs ./logs
-node ./bin/loopbrake.mjs ./logs/session-01.jsonl
 ```
 
-Each line of output is one thrashing file with the tools that touched it:
+Each report line looks like `6x fno.py (rollout-01a1784f.jsonl) via apply_patch`,
+followed by the `LPB001` finding with its severity and evidence string.
 
-```
-6x fno.py (rollout-01a1784f.jsonl) via Edit, MultiEdit
-```
+## License
 
-## Library
-
-```js
-import { collectMutations, rankByMutations } from './src/analyzer.mjs';
-
-for (const { file, edits, methods } of rankByMutations(collectMutations('session.jsonl'))) {
-  console.log(`${edits}x ${file} via ${methods.join(', ')}`);
-}
-```
-
-`Edit` and `Write` count as one mutation each, and a `MultiEdit` counts as one
-mutation per hunk it carries, so a single call that rewrites five regions ranks
-above five separate one-line patches.
-
-## Detection rules
-
-| Rule | Severity | What it flags |
-| :--- | :--- | :--- |
-| `LPB001` | `CRITICAL` | 4+ mutations to one source file in a single session |
-| `LPB002` | `HIGH` | 3 mutations to one source file (band-aid threshold) |
-| `LPB007` | `INFO` | `README.md` / `package.json` churn excluded from thrash counts |
-
-End-of-task `README.md` and `package.json` updates are normal, so they are
-filtered out of the per-file counts instead of inflating them.
+MIT © [Prince Jain](https://github.com/princejain756)
