@@ -1,7 +1,7 @@
 {
   "name": "loopbrake",
   "version": "0.1.0",
-  "description": "Zero-dependency auditor that flags coding agents which patch the same source file again and again instead of fixing the root cause.",
+  "description": "Zero-dependency edit-thrashing and shell-write bypass auditor for Claude Code transcripts.",
   "type": "module",
   "bin": {
     "loopbrake": "./bin/loopbrake.mjs"
@@ -10,6 +10,14 @@
   "scripts": {
     "test": "node --test tests/loopbrake.test.mjs"
   },
+  "keywords": [
+    "claude-code",
+    "ai-agents",
+    "edit-thrashing",
+    "static-analysis",
+    "llm-ops",
+    "cli"
+  ],
   "engines": {
     "node": ">=18.0.0"
   },
