@@ -25,6 +25,20 @@ export const RULE_META = {
     title: "Overlapping Hunk or Self-Revert Rewrite on Previously Patched Lines",
     points: 15
   },
+  LPB004: {
+    id: "LPB004",
+    plane: "thrash",
+    severity: "MEDIUM",
+    title: "Shell-Write Bypass of Structured Edit/apply_patch Tools (cat <<EOF / sed -i / .write_text)",
+    points: 8
+  },
+  LPB006: {
+    id: "LPB006",
+    plane: "thrash",
+    severity: "INFO",
+    title: "Read-Only python3 -c / sed -n Inspections Separated (False-Positive Guard)",
+    points: 0
+  },
   LPB007: {
     id: "LPB007",
     plane: "thrash",
@@ -43,13 +57,34 @@ export function extractTargetSourceFiles(cmd) {
   return [...new Set(matches)].filter((f) => !DOC_OR_MANIFEST_RE.test(f));
 }
 
+// Shell idioms that actually rewrite a file. A bare `cat file.py` is not a write,
+// but a heredoc, an in-place sed/perl edit or a Python write call is.
+export function isShellFileWrite(cmd) {
+  const s = String(cmd || "");
+  if (!s) return false;
+  if (/\b(?:sed\s+-i|perl\s+-pi|tee\s+|cat\s+<<|\.write_text\(|shutil\.copy)/i.test(s)) {
+    return true;
+  }
+  if (/open\([^)]*,\s*["'][wa][b+]?["']\)/.test(s)) {
+    return true;
+  }
+  if (/(?:^|[^\d>])>\s*[a-zA-Z0-9_./-]+\.(?:py|mjs|cjs|js|ts|tsx|jsx|rs|go|java|html|css|sh)\b/.test(s)) {
+    return true;
+  }
+  return false;
+}
+
 export function analyzeSessionTranscript(filePath) {
   const findings = [];
   const sessionLabel = path.basename(filePath);
 
   let structuredEditCalls = 0;
+  let shellMutationCalls = 0;
+  let readOnlyPythonOrSedCount = 0;
+  let jsonlPrefixCollisionCount = 0;
   let docManifestFilteredCount = 0;
   let sameTargetOverlapCount = 0;
+  const readFiles = new Set();
   const fileMutations = new Map();
 
   const content = fs.readFileSync(filePath, "utf8");
@@ -68,9 +103,38 @@ export function analyzeSessionTranscript(filePath) {
       for (const blk of obj.message.content) {
         if (blk?.type !== "tool_use") continue;
         const name = String(blk.name || "");
+        const input = blk.input || {};
+
+        if (name === "Read") {
+          const fp = path.basename(String(input.file_path || input.path || ""));
+          if (fp) readFiles.add(fp);
+          continue;
+        }
+
+        if (name === "Bash") {
+          const cmd = String(input.command || "");
+          if (/\.jsonl\b/.test(cmd)) jsonlPrefixCollisionCount++;
+          const targets = extractTargetSourceFiles(cmd);
+          if (/\b(?:cat|head|tail|sed\s+-n|grep|rg)\b/.test(cmd)) {
+            for (const t of targets) readFiles.add(t);
+          }
+          if (isShellFileWrite(cmd) && targets.length > 0) {
+            shellMutationCalls++;
+            const target = targets[0];
+            if (!fileMutations.has(target)) fileMutations.set(target, []);
+            fileMutations.get(target).push({
+              method: "BashWrite",
+              oldStr: "",
+              newStr: cmd.slice(0, 240)
+            });
+          } else if (targets.length > 0 && /\b(?:python3?\s+-c|sed\s+-n)\b/.test(cmd)) {
+            readOnlyPythonOrSedCount++;
+          }
+          continue;
+        }
+
         if (!["Edit", "MultiEdit", "Write"].includes(name)) continue;
 
-        const input = blk.input || {};
         const fp = path.basename(String(input.file_path || input.path || "unknown"));
         // End-of-task README/package.json churn is expected, not thrashing.
         if (DOC_OR_MANIFEST_RE.test(fp)) {
@@ -78,6 +142,7 @@ export function analyzeSessionTranscript(filePath) {
           continue;
         }
         structuredEditCalls++;
+        readFiles.add(fp);
 
         if (!fileMutations.has(fp)) fileMutations.set(fp, []);
         const edits =
@@ -150,6 +215,9 @@ export function analyzeSessionTranscript(filePath) {
   return {
     findings,
     structuredEditCalls,
+    shellMutationCalls,
+    readOnlyPythonOrSedCount,
+    jsonlPrefixCollisionCount,
     docManifestFilteredCount,
     sameTargetOverlapCount,
     thrashedFiles
@@ -188,6 +256,9 @@ export function auditAgentLoops(options = {}) {
 
   const allFindings = [];
   let structuredEditCalls = 0;
+  let shellMutationCalls = 0;
+  let readOnlyPythonOrSedCount = 0;
+  let jsonlPrefixCollisionCount = 0;
   let docManifestFilteredCount = 0;
   let sameTargetOverlapCount = 0;
   const allThrashedFiles = [];
@@ -197,6 +268,9 @@ export function auditAgentLoops(options = {}) {
       const res = analyzeSessionTranscript(tf);
       allFindings.push(...res.findings);
       structuredEditCalls += res.structuredEditCalls;
+      shellMutationCalls += res.shellMutationCalls;
+      readOnlyPythonOrSedCount += res.readOnlyPythonOrSedCount;
+      jsonlPrefixCollisionCount += res.jsonlPrefixCollisionCount;
       docManifestFilteredCount += res.docManifestFilteredCount;
       sameTargetOverlapCount += res.sameTargetOverlapCount;
       for (const item of res.thrashedFiles) {
@@ -207,14 +281,37 @@ export function auditAgentLoops(options = {}) {
     }
   }
 
-  if (docManifestFilteredCount > 0) {
+  if (shellMutationCalls > 0) {
+    const pct = Math.round((shellMutationCalls / Math.max(1, structuredEditCalls + shellMutationCalls)) * 1000) / 10;
+    allFindings.push({
+      ruleId: "LPB004",
+      plane: "thrash",
+      severity: "MEDIUM",
+      file: "session-transcripts",
+      detail: `${shellMutationCalls} source file mutation(s) (${pct}% of all writes) executed via shell heredoc/sed/.write_text, bypassing structured Edit hooks`,
+      evidence: `${shellMutationCalls} shell writes vs ${structuredEditCalls} Edit/Write/apply_patch calls`
+    });
+  }
+
+  if (readOnlyPythonOrSedCount > 0) {
+    allFindings.push({
+      ruleId: "LPB006",
+      plane: "thrash",
+      severity: "INFO",
+      file: "session-transcripts",
+      detail: `${readOnlyPythonOrSedCount} read-only python3 -c / sed -n code inspections separated from true file mutations`,
+      evidence: `${readOnlyPythonOrSedCount} read-only inspections excluded`
+    });
+  }
+
+  if (jsonlPrefixCollisionCount > 0 || docManifestFilteredCount > 0) {
     allFindings.push({
       ruleId: "LPB007",
       plane: "thrash",
       severity: "INFO",
       file: "session-transcripts",
-      detail: `${docManifestFilteredCount} doc/manifest edit(s) excluded from source thrash counts`,
-      evidence: `${docManifestFilteredCount} doc/manifest updates`
+      detail: `${jsonlPrefixCollisionCount} .jsonl-vs-.js prefix collision(s) and ${docManifestFilteredCount} doc/manifest edit(s) excluded from source thrash counts`,
+      evidence: `${jsonlPrefixCollisionCount} .jsonl collisions, ${docManifestFilteredCount} doc/manifest updates`
     });
   }
 
@@ -238,6 +335,9 @@ export function auditAgentLoops(options = {}) {
   const grade =
     score >= 90 ? "A" : score >= 80 ? "B" : score >= 65 ? "C" : score >= 50 ? "D" : "F";
 
+  const totalWrites = structuredEditCalls + shellMutationCalls;
+  const shellBypassPct = totalWrites > 0 ? Math.round((shellMutationCalls / totalWrites) * 1000) / 10 : 0;
+
   return {
     sessionsScanned: transcriptFiles.length,
     score,
@@ -246,6 +346,10 @@ export function auditAgentLoops(options = {}) {
     ruleCounts,
     metrics: {
       structuredEditCalls,
+      shellMutationCalls,
+      shellBypassPct,
+      readOnlyPythonOrSedCount,
+      jsonlPrefixCollisionCount,
       docManifestFilteredCount,
       sameTargetOverlapCount,
       thrashedFileCount: allThrashedFiles.length
