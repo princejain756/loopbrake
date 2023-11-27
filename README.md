@@ -39,3 +39,16 @@ MEDIUM LPB004 session-transcripts: 78 of 199 writes (39.2%) bypassed Edit
 ```
 
 ## Detection rules
+
+| Rule | Severity | What it flags |
+| :--- | :--- | :--- |
+| `LPB001` | `CRITICAL` | 4+ mutations to one source file in a single session |
+| `LPB002` | `HIGH` | 3 mutations to one source file (band-aid threshold) |
+| `LPB003` | `HIGH` | Overlapping hunk or self-revert on lines a previous edit wrote |
+| `LPB004` | `MEDIUM` | Shell-write bypass of `Edit` (`cat <<EOF`, `sed -i`, `.write_text`) |
+| `LPB006` | `INFO` | Read-only `python3 -c` / `sed -n` inspections excluded from writes |
+| `LPB007` | `INFO` | `README.md` / `package.json` churn excluded from thrash counts |
+
+## License
+
+MIT © [Prince Jain](https://github.com/princejain756)
