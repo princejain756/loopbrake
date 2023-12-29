@@ -43,8 +43,31 @@ export const RULE_META = {
     id: "LPB007",
     plane: "thrash",
     severity: "INFO",
-    title: "Doc/Manifest Updates Filtered from Source Thrash Counts (False-Positive Guard)",
+    title: "Doc/Manifest Prefix Collisions (.jsonl vs .js) & Updates Filtered (False-Positive Guard)",
     points: 0
+  },
+
+  // Plane 2: tool-error doom loops and deleted-sandbox CWD drift
+  LPB008: {
+    id: "LPB008",
+    plane: "loop",
+    severity: "CRITICAL",
+    title: "Severe Tool-Error Doom Loop (>= 4 Consecutive Failing Tool Calls)",
+    points: 30
+  },
+  LPB009: {
+    id: "LPB009",
+    plane: "loop",
+    severity: "HIGH",
+    title: "Consecutive Tool-Error Streak (2 to 3 Consecutive Failing Tool Calls)",
+    points: 10
+  },
+  LPB010: {
+    id: "LPB010",
+    plane: "loop",
+    severity: "CRITICAL",
+    title: "Deleted-Sandbox CWD Escape Recovering Shell into User Home Directory",
+    points: 25
   }
 };
 
@@ -55,6 +78,13 @@ export function extractTargetSourceFiles(cmd) {
   const s = String(cmd || "");
   const matches = [...s.matchAll(SOURCE_FILE_RE)].map((m) => path.basename(m[1]));
   return [...new Set(matches)].filter((f) => !DOC_OR_MANIFEST_RE.test(f));
+}
+
+export function maskHome(text) {
+  if (!text) return "";
+  return String(text)
+    .replace(/\/Users\/[a-zA-Z0-9._-]+/g, "~")
+    .replace(/\/home\/[a-zA-Z0-9._-]+/g, "~");
 }
 
 // Shell idioms that actually rewrite a file. A bare `cat file.py` is not a write,
@@ -84,8 +114,15 @@ export function analyzeSessionTranscript(filePath) {
   let jsonlPrefixCollisionCount = 0;
   let docManifestFilteredCount = 0;
   let sameTargetOverlapCount = 0;
+  let totalErrors = 0;
+  let consecutiveErrorStreaks = 0;
+  let maxErrorStreak = 0;
+  let maxErrorSignature = "";
+  let cwdEscapeCount = 0;
   const readFiles = new Set();
   const fileMutations = new Map();
+  let currentErrorStreak = 0;
+  let currentErrorSample = "";
 
   const content = fs.readFileSync(filePath, "utf8");
   const lines = content.split("\n");
@@ -158,6 +195,49 @@ export function analyzeSessionTranscript(filePath) {
         }
       }
     }
+
+    // Tool results: the only place errors, exit codes and shell cwd recovery
+    // notices are visible.
+    if (obj?.type === "user" && Array.isArray(obj?.message?.content)) {
+      for (const blk of obj.message.content) {
+        if (blk?.type !== "tool_result") continue;
+        const txt = typeof blk.content === "string" ? blk.content : JSON.stringify(blk.content || "");
+
+        if (/Working directory .* was deleted; shell cwd recovered to/i.test(txt)) {
+          cwdEscapeCount++;
+          findings.push({
+            ruleId: "LPB010",
+            plane: "loop",
+            severity: "CRITICAL",
+            file: sessionLabel,
+            detail: `Deleted-sandbox CWD escape in ${sessionLabel}: shell recovered to user home directory mid-session`,
+            evidence: maskHome(txt.slice(0, 160))
+          });
+        }
+
+        const isErr =
+          Boolean(blk.is_error) ||
+          /Exit code [1-9]|Traceback \(most recent|SyntaxError:|ReferenceError:|TypeError:|Command failed|<tool_use_error>/i.test(
+            txt
+          );
+        if (isErr) {
+          totalErrors++;
+          currentErrorStreak++;
+          if (currentErrorStreak === 1) {
+            currentErrorSample = maskHome(txt.replace(/\s+/g, " ").slice(0, 120));
+          }
+          if (currentErrorStreak === 2) {
+            consecutiveErrorStreaks++;
+          }
+          if (currentErrorStreak > maxErrorStreak) {
+            maxErrorStreak = currentErrorStreak;
+            maxErrorSignature = currentErrorSample;
+          }
+        } else {
+          currentErrorStreak = 0;
+        }
+      }
+    }
   }
 
   // Same-file edit thrashing. Four mutations is a redesign; three is already a band-aid.
@@ -220,6 +300,10 @@ export function analyzeSessionTranscript(filePath) {
     jsonlPrefixCollisionCount,
     docManifestFilteredCount,
     sameTargetOverlapCount,
+    totalErrors,
+    consecutiveErrorStreaks,
+    maxErrorStreak,
+    cwdEscapeCount,
     thrashedFiles
   };
 }
@@ -261,6 +345,10 @@ export function auditAgentLoops(options = {}) {
   let jsonlPrefixCollisionCount = 0;
   let docManifestFilteredCount = 0;
   let sameTargetOverlapCount = 0;
+  let totalErrors = 0;
+  let consecutiveErrorStreaks = 0;
+  let maxErrorStreak = 0;
+  let cwdEscapeCount = 0;
   const allThrashedFiles = [];
 
   for (const tf of transcriptFiles) {
@@ -273,6 +361,10 @@ export function auditAgentLoops(options = {}) {
       jsonlPrefixCollisionCount += res.jsonlPrefixCollisionCount;
       docManifestFilteredCount += res.docManifestFilteredCount;
       sameTargetOverlapCount += res.sameTargetOverlapCount;
+      totalErrors += res.totalErrors;
+      consecutiveErrorStreaks += res.consecutiveErrorStreaks;
+      if (res.maxErrorStreak > maxErrorStreak) maxErrorStreak = res.maxErrorStreak;
+      cwdEscapeCount += res.cwdEscapeCount;
       for (const item of res.thrashedFiles) {
         allThrashedFiles.push({ session: path.basename(tf), ...item });
       }
@@ -315,6 +407,26 @@ export function auditAgentLoops(options = {}) {
     });
   }
 
+  if (maxErrorStreak >= 4) {
+    allFindings.push({
+      ruleId: "LPB008",
+      plane: "loop",
+      severity: "CRITICAL",
+      file: "session-transcripts",
+      detail: `longest streak of ${maxErrorStreak} consecutive failing tool calls across all sessions`,
+      evidence: `${maxErrorStreak} consecutive failures`
+    });
+  } else if (maxErrorStreak >= 2) {
+    allFindings.push({
+      ruleId: "LPB009",
+      plane: "loop",
+      severity: "HIGH",
+      file: "session-transcripts",
+      detail: `longest streak of ${maxErrorStreak} consecutive failing tool calls across all sessions`,
+      evidence: `${maxErrorStreak} consecutive failures`
+    });
+  }
+
   const ruleCounts = {};
   const severityCounts = { CRITICAL: 0, HIGH: 0, MEDIUM: 0, LOW: 0, INFO: 0 };
   for (const f of allFindings) {
@@ -352,7 +464,11 @@ export function auditAgentLoops(options = {}) {
       jsonlPrefixCollisionCount,
       docManifestFilteredCount,
       sameTargetOverlapCount,
-      thrashedFileCount: allThrashedFiles.length
+      thrashedFileCount: allThrashedFiles.length,
+      totalErrors,
+      consecutiveErrorStreaks,
+      maxErrorStreak,
+      cwdEscapeCount
     },
     thrashedFiles: allThrashedFiles.sort((a, b) => b.edits - a.edits),
     findings: allFindings
