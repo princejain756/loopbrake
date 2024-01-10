@@ -11,6 +11,8 @@ function renderReport(report) {
   console.log(`thrashed source files: ${metrics.thrashedFileCount}`);
   console.log(`overlapping hunks: ${metrics.sameTargetOverlapCount}`);
   console.log(`doc/manifest edits excluded: ${metrics.docManifestFilteredCount}`);
+  console.log(`failed tool calls: ${metrics.totalErrors} (longest streak ${metrics.maxErrorStreak})`);
+  console.log(`deleted-sandbox cwd escapes: ${metrics.cwdEscapeCount}`);
   console.log('');
 
   if (thrashedFiles.length > 0) {
