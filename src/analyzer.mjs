@@ -3,7 +3,7 @@ import path from "node:path";
 import os from "node:os";
 
 export const RULE_META = {
-  // Plane 1: file edit thrashing and patch overlap
+  // Plane 1: File Edit Thrashing, Shell-Write Bypass & Patch Overlap
   LPB001: {
     id: "LPB001",
     plane: "thrash",
@@ -36,18 +36,18 @@ export const RULE_META = {
     id: "LPB006",
     plane: "thrash",
     severity: "INFO",
-    title: "Read-Only python3 -c / sed -n Inspections Separated (False-Positive Guard)",
+    title: "Read-Only python3 -c / sed -n AST & Log Inspections Separated (False-Positive Guard)",
     points: 0
   },
   LPB007: {
     id: "LPB007",
     plane: "thrash",
     severity: "INFO",
-    title: "Doc/Manifest Prefix Collisions (.jsonl vs .js) & Updates Filtered (False-Positive Guard)",
+    title: "Prefix Extension Collisions (.jsonl vs .js) & Doc/Manifest Updates Filtered (False-Positive Guard)",
     points: 0
   },
 
-  // Plane 2: tool-error doom loops and deleted-sandbox CWD drift
+  // Plane 2: Tool-Error Doom Loops, Deleted-Sandbox CWD Drift & Polling Spins
   LPB008: {
     id: "LPB008",
     plane: "loop",
@@ -68,17 +68,39 @@ export const RULE_META = {
     severity: "CRITICAL",
     title: "Deleted-Sandbox CWD Escape Recovering Shell into User Home Directory",
     points: 25
+  },
+  LPB011: {
+    id: "LPB011",
+    plane: "loop",
+    severity: "MEDIUM",
+    title: "Identical Shell Command Retry Loop (>= 3 Consecutive Identical Executions)",
+    points: 10
+  },
+  LPB012: {
+    id: "LPB012",
+    plane: "loop",
+    severity: "MEDIUM",
+    title: "Empty write_stdin Polling Spin (>= 3 Empty Polls in One Session)",
+    points: 8
+  },
+  LPB013: {
+    id: "LPB013",
+    plane: "loop",
+    severity: "LOW",
+    title: "Duplicate Skill Re-Invocation in Same Session",
+    points: 4
+  },
+  LPB014: {
+    id: "LPB014",
+    plane: "loop",
+    severity: "INFO",
+    title: "Streaming tool_use.id / call_id Progress Rows Deduplicated (False-Positive Guard)",
+    points: 0
   }
 };
 
 const SOURCE_FILE_RE = /\b([a-zA-Z0-9_.-]+\.(?:py|mjs|cjs|js|ts|tsx|jsx|rs|go|java|c|cpp|h|rb|php|swift|kt|sql|sh|css|html|vue|svelte))\b/g;
 const DOC_OR_MANIFEST_RE = /^(?:README\.md|CHANGELOG\.md|LICENSE|package\.json|package-lock\.json|pnpm-lock\.yaml|Cargo\.toml|Cargo\.lock|pyproject\.toml)$/i;
-
-export function extractTargetSourceFiles(cmd) {
-  const s = String(cmd || "");
-  const matches = [...s.matchAll(SOURCE_FILE_RE)].map((m) => path.basename(m[1]));
-  return [...new Set(matches)].filter((f) => !DOC_OR_MANIFEST_RE.test(f));
-}
 
 export function maskHome(text) {
   if (!text) return "";
@@ -87,8 +109,6 @@ export function maskHome(text) {
     .replace(/\/home\/[a-zA-Z0-9._-]+/g, "~");
 }
 
-// Shell idioms that actually rewrite a file. A bare `cat file.py` is not a write,
-// but a heredoc, an in-place sed/perl edit or a Python write call is.
 export function isShellFileWrite(cmd) {
   const s = String(cmd || "");
   if (!s) return false;
@@ -104,10 +124,18 @@ export function isShellFileWrite(cmd) {
   return false;
 }
 
+export function extractTargetSourceFiles(cmd) {
+  const s = String(cmd || "");
+  const matches = [...s.matchAll(SOURCE_FILE_RE)].map((m) => path.basename(m[1]));
+  return [...new Set(matches)].filter((f) => !DOC_OR_MANIFEST_RE.test(f));
+}
+
 export function analyzeSessionTranscript(filePath) {
   const findings = [];
   const sessionLabel = path.basename(filePath);
-
+  const seenIds = new Set();
+  let rawProgressRows = 0;
+  let deduplicatedCalls = 0;
   let structuredEditCalls = 0;
   let shellMutationCalls = 0;
   let readOnlyPythonOrSedCount = 0;
@@ -119,8 +147,15 @@ export function analyzeSessionTranscript(filePath) {
   let maxErrorStreak = 0;
   let maxErrorSignature = "";
   let cwdEscapeCount = 0;
+  let commandRetryLoops = 0;
+  let wastedRetryCalls = 0;
+  let emptyStdinPolls = 0;
+  let duplicateSkillCalls = 0;
+
   const readFiles = new Set();
-  const fileMutations = new Map();
+  const fileMutations = new Map(); // filename -> array of { method, oldStr, newStr }
+  const skillsInvoked = new Map();
+  const bashSeq = [];
   let currentErrorStreak = 0;
   let currentErrorSample = "";
 
@@ -136,19 +171,42 @@ export function analyzeSessionTranscript(filePath) {
       continue;
     }
 
+    // 1. Claude Code assistant tool_use
     if (obj?.type === "assistant" && Array.isArray(obj?.message?.content)) {
       for (const blk of obj.message.content) {
         if (blk?.type !== "tool_use") continue;
+        rawProgressRows++;
+        if (blk.id && seenIds.has(blk.id)) continue;
+        if (blk.id) seenIds.add(blk.id);
+        deduplicatedCalls++;
+
         const name = String(blk.name || "");
         const input = blk.input || {};
 
         if (name === "Read") {
           const fp = path.basename(String(input.file_path || input.path || ""));
           if (fp) readFiles.add(fp);
-          continue;
-        }
-
-        if (name === "Bash") {
+        } else if (["Edit", "MultiEdit", "Write"].includes(name)) {
+          const fp = path.basename(String(input.file_path || input.path || "unknown"));
+          if (DOC_OR_MANIFEST_RE.test(fp)) {
+            docManifestFilteredCount++;
+            continue;
+          }
+          structuredEditCalls++;
+          readFiles.add(fp);
+          if (!fileMutations.has(fp)) fileMutations.set(fp, []);
+          const edits =
+            name === "MultiEdit" && Array.isArray(input.edits)
+              ? input.edits
+              : [{ old_string: input.old_string || "", new_string: input.new_string || input.content || "" }];
+          for (const ed of edits) {
+            fileMutations.get(fp).push({
+              method: name,
+              oldStr: String(ed.old_string || ""),
+              newStr: String(ed.new_string || "")
+            });
+          }
+        } else if (name === "Bash") {
           const cmd = String(input.command || "");
           if (/\.jsonl\b/.test(cmd)) jsonlPrefixCollisionCount++;
           const targets = extractTargetSourceFiles(cmd);
@@ -167,42 +225,19 @@ export function analyzeSessionTranscript(filePath) {
           } else if (targets.length > 0 && /\b(?:python3?\s+-c|sed\s+-n)\b/.test(cmd)) {
             readOnlyPythonOrSedCount++;
           }
-          continue;
-        }
-
-        if (!["Edit", "MultiEdit", "Write"].includes(name)) continue;
-
-        const fp = path.basename(String(input.file_path || input.path || "unknown"));
-        // End-of-task README/package.json churn is expected, not thrashing.
-        if (DOC_OR_MANIFEST_RE.test(fp)) {
-          docManifestFilteredCount++;
-          continue;
-        }
-        structuredEditCalls++;
-        readFiles.add(fp);
-
-        if (!fileMutations.has(fp)) fileMutations.set(fp, []);
-        const edits =
-          name === "MultiEdit" && Array.isArray(input.edits)
-            ? input.edits
-            : [{ old_string: input.old_string || "", new_string: input.new_string || input.content || "" }];
-        for (const ed of edits) {
-          fileMutations.get(fp).push({
-            method: name,
-            oldStr: String(ed.old_string || ""),
-            newStr: String(ed.new_string || "")
-          });
+          bashSeq.push(cmd);
+        } else if (name === "Skill") {
+          const sk = String(input.skill || input.name || "unknown").trim();
+          skillsInvoked.set(sk, (skillsInvoked.get(sk) || 0) + 1);
         }
       }
     }
 
-    // Tool results: the only place errors, exit codes and shell cwd recovery
-    // notices are visible.
+    // 2. Claude Code user tool_result
     if (obj?.type === "user" && Array.isArray(obj?.message?.content)) {
       for (const blk of obj.message.content) {
         if (blk?.type !== "tool_result") continue;
         const txt = typeof blk.content === "string" ? blk.content : JSON.stringify(blk.content || "");
-
         if (/Working directory .* was deleted; shell cwd recovered to/i.test(txt)) {
           cwdEscapeCount++;
           findings.push({
@@ -238,43 +273,135 @@ export function analyzeSessionTranscript(filePath) {
         }
       }
     }
+
+    // 3. Codex CLI function_call / custom_tool_call
+    if (
+      obj?.type === "response_item" &&
+      (obj?.payload?.type === "function_call" || obj?.payload?.type === "custom_tool_call")
+    ) {
+      rawProgressRows++;
+      const id = obj.payload.call_id || obj.payload.id;
+      if (id && seenIds.has(id)) continue;
+      if (id) seenIds.add(id);
+      deduplicatedCalls++;
+
+      const name = String(obj.payload.name || "");
+      const rawIn = String(obj.payload.input || obj.payload.arguments || "");
+
+      if (/\.jsonl\b/.test(rawIn)) jsonlPrefixCollisionCount++;
+
+      if (name === "apply_patch" || name === "write_file") {
+        const rawTargets =
+          name === "apply_patch"
+            ? [...rawIn.matchAll(/\*\*\* (?:Update|Add) File: ([^\n]+)/g)].map((m) => path.basename(m[1].trim()))
+            : extractTargetSourceFiles(rawIn);
+        const targets = rawTargets.filter((f) => !DOC_OR_MANIFEST_RE.test(f));
+        if (rawTargets.length > targets.length) {
+          docManifestFilteredCount += rawTargets.length - targets.length;
+        }
+        if (targets.length > 0) {
+          structuredEditCalls++;
+          for (const fp of targets) {
+            readFiles.add(fp);
+            if (!fileMutations.has(fp)) fileMutations.set(fp, []);
+            fileMutations.get(fp).push({
+              method: name,
+              oldStr: "",
+              newStr: rawIn.slice(0, 260)
+            });
+          }
+        }
+      } else if (name === "exec" || name === "exec_command") {
+        if (/write_stdin\(\{[^}]*chars:\s*""/.test(rawIn)) {
+          emptyStdinPolls++;
+        }
+        const targets = extractTargetSourceFiles(rawIn);
+        if (/\b(?:cat|head|tail|sed\s+-n|grep|rg)\b/.test(rawIn)) {
+          for (const t of targets) readFiles.add(t);
+        }
+        if (isShellFileWrite(rawIn) && targets.length > 0) {
+          shellMutationCalls++;
+          const target = targets[0];
+          if (!fileMutations.has(target)) fileMutations.set(target, []);
+          fileMutations.get(target).push({
+            method: `codex:${name}`,
+            oldStr: "",
+            newStr: rawIn.slice(0, 240)
+          });
+        } else if (targets.length > 0 && /\b(?:python3?\s+-c|sed\s+-n)\b/.test(rawIn)) {
+          readOnlyPythonOrSedCount++;
+        }
+        bashSeq.push(rawIn);
+      } else if (name === "write_stdin") {
+        try {
+          const parsed = JSON.parse(rawIn);
+          if (!parsed.chars) emptyStdinPolls++;
+        } catch {
+          // ignore
+        }
+      }
+    }
+
+    // 4. Codex CLI outputs
+    if (
+      obj?.type === "response_item" &&
+      (obj?.payload?.type === "function_call_output" || obj?.payload?.type === "custom_tool_call_output")
+    ) {
+      const rawOut = obj.payload.output;
+      const txt = typeof rawOut === "string" ? rawOut : JSON.stringify(rawOut || "");
+      const exitMatch = txt.match(/(?:Process exited with code|Exit code:?|exit_code":)\s*([1-9]\d*)/i);
+      const hasFatal = /Traceback \(most recent|SyntaxError:|ReferenceError:|TypeError:|verification failed/i.test(txt);
+      if (exitMatch || hasFatal) {
+        totalErrors++;
+        currentErrorStreak++;
+        if (currentErrorStreak === 1) {
+          currentErrorSample = maskHome(txt.replace(/\s+/g, " ").slice(0, 120));
+        }
+        if (currentErrorStreak === 2) {
+          consecutiveErrorStreaks++;
+        }
+        if (currentErrorStreak > maxErrorStreak) {
+          maxErrorStreak = currentErrorStreak;
+          maxErrorSignature = currentErrorSample;
+        }
+      } else {
+        currentErrorStreak = 0;
+      }
+    }
   }
 
-  // Same-file edit thrashing. Four mutations is a redesign; three is already a band-aid.
+  // Evaluate per-file edit thrashing & overlapping hunks
   const thrashedFiles = [];
   for (const [fp, list] of fileMutations.entries()) {
-    if (list.length < 3) continue;
-    const methods = [...new Set(list.map((x) => x.method))];
-    thrashedFiles.push({ file: fp, edits: list.length, methods });
     if (list.length >= 4) {
+      thrashedFiles.push({ file: fp, edits: list.length, methods: [...new Set(list.map((x) => x.method))] });
       findings.push({
         ruleId: "LPB001",
         plane: "thrash",
         severity: "CRITICAL",
         file: sessionLabel,
-        detail: `${fp} mutated ${list.length} times in ${sessionLabel} via ${methods.join(", ")}`,
+        detail: `${fp} mutated ${list.length} times in ${sessionLabel} via ${[...new Set(list.map((x) => x.method))].join(", ")}`,
         evidence: `${fp}: ${list.length} mutations`
       });
-    } else {
+    } else if (list.length === 3) {
+      thrashedFiles.push({ file: fp, edits: list.length, methods: [...new Set(list.map((x) => x.method))] });
       findings.push({
         ruleId: "LPB002",
         plane: "thrash",
         severity: "HIGH",
         file: sessionLabel,
-        detail: `${fp} patched 3 times in ${sessionLabel} via ${methods.join(", ")} (band-aid threshold)`,
+        detail: `${fp} patched 3 times in ${sessionLabel} via ${[...new Set(list.map((x) => x.method))].join(", ")} (band-aid threshold)`,
         evidence: `${fp}: 3 mutations`
       });
     }
 
-    // Overlapping hunks: a later old_string carries text the previous new_string
-    // introduced, which means the earlier patch is being partially reverted.
     for (let i = 0; i < list.length; i++) {
       const a = list[i];
       if (!a.newStr || a.newStr.length < 15) continue;
-      const prefixA = a.newStr.slice(0, Math.min(50, a.newStr.length));
       for (let j = i + 1; j < list.length; j++) {
         const b = list[j];
         if (!b.oldStr || b.oldStr.length < 15) continue;
+        const prefixA = a.newStr.slice(0, Math.min(50, a.newStr.length));
         const prefixB = b.oldStr.slice(0, Math.min(50, b.oldStr.length));
         if (b.oldStr.includes(prefixA) || a.newStr.includes(prefixB)) {
           sameTargetOverlapCount++;
@@ -292,8 +419,82 @@ export function analyzeSessionTranscript(filePath) {
     }
   }
 
+  // Evaluate consecutive shell command retry loops
+  const normCmd = (c) => String(c || "").replace(/\s+/g, " ").trim().slice(0, 90);
+  let cmdStreak = 1;
+  for (let i = 1; i < bashSeq.length; i++) {
+    const prev = normCmd(bashSeq[i - 1]);
+    const cur = normCmd(bashSeq[i]);
+    if (cur && cur === prev) {
+      cmdStreak++;
+      if (cmdStreak === 3) {
+        commandRetryLoops++;
+        findings.push({
+          ruleId: "LPB011",
+          plane: "loop",
+          severity: "MEDIUM",
+          file: sessionLabel,
+          detail: `Identical shell command executed >= 3 times consecutively in ${sessionLabel}`,
+          evidence: maskHome(cur.slice(0, 100))
+        });
+      }
+      if (cmdStreak >= 3) {
+        wastedRetryCalls++;
+      }
+    } else {
+      cmdStreak = 1;
+    }
+  }
+
+  if (maxErrorStreak >= 4) {
+    findings.push({
+      ruleId: "LPB008",
+      plane: "loop",
+      severity: "CRITICAL",
+      file: sessionLabel,
+      detail: `${maxErrorStreak} consecutive failing tool calls in ${sessionLabel} (${maxErrorSignature})`,
+      evidence: maxErrorSignature
+    });
+  } else if (maxErrorStreak >= 2) {
+    findings.push({
+      ruleId: "LPB009",
+      plane: "loop",
+      severity: "HIGH",
+      file: sessionLabel,
+      detail: `${maxErrorStreak} consecutive failing tool calls in ${sessionLabel}`,
+      evidence: maxErrorSignature
+    });
+  }
+
+  if (emptyStdinPolls >= 3) {
+    findings.push({
+      ruleId: "LPB012",
+      plane: "loop",
+      severity: "MEDIUM",
+      file: sessionLabel,
+      detail: `${emptyStdinPolls} empty write_stdin polling calls in ${sessionLabel}`,
+      evidence: `write_stdin empty polls: ${emptyStdinPolls}`
+    });
+  }
+
+  for (const [sk, count] of skillsInvoked.entries()) {
+    if (count >= 2) {
+      duplicateSkillCalls += count - 1;
+      findings.push({
+        ruleId: "LPB013",
+        plane: "loop",
+        severity: "LOW",
+        file: sessionLabel,
+        detail: `Skill "${sk}" invoked ${count} times inside ${sessionLabel}`,
+        evidence: `Skill: ${sk} (${count}x)`
+      });
+    }
+  }
+
   return {
     findings,
+    rawProgressRows,
+    deduplicatedCalls,
     structuredEditCalls,
     shellMutationCalls,
     readOnlyPythonOrSedCount,
@@ -304,6 +505,10 @@ export function analyzeSessionTranscript(filePath) {
     consecutiveErrorStreaks,
     maxErrorStreak,
     cwdEscapeCount,
+    commandRetryLoops,
+    wastedRetryCalls,
+    emptyStdinPolls,
+    duplicateSkillCalls,
     thrashedFiles
   };
 }
@@ -317,160 +522,7 @@ function collectJsonlFiles(dir, out = []) {
       else if (entry.isFile() && entry.name.endsWith(".jsonl")) out.push(full);
     }
   } catch {
-    // unreadable directory: keep whatever was collected so far
+    // ignore
   }
   return out;
-}
-
-export function auditAgentLoops(options = {}) {
-  let transcriptFiles;
-  if (Array.isArray(options)) {
-    transcriptFiles = [];
-    for (const p of options) {
-      if (!fs.existsSync(p)) continue;
-      const st = fs.statSync(p);
-      if (st.isDirectory()) collectJsonlFiles(p, transcriptFiles);
-      else if (st.isFile() && p.endsWith(".jsonl")) transcriptFiles.push(p);
-    }
-  } else {
-    const home = options.homeDir || os.homedir();
-    transcriptFiles =
-      options.transcriptFiles || collectJsonlFiles(path.join(home, ".claude", "projects"));
-  }
-
-  const allFindings = [];
-  let structuredEditCalls = 0;
-  let shellMutationCalls = 0;
-  let readOnlyPythonOrSedCount = 0;
-  let jsonlPrefixCollisionCount = 0;
-  let docManifestFilteredCount = 0;
-  let sameTargetOverlapCount = 0;
-  let totalErrors = 0;
-  let consecutiveErrorStreaks = 0;
-  let maxErrorStreak = 0;
-  let cwdEscapeCount = 0;
-  const allThrashedFiles = [];
-
-  for (const tf of transcriptFiles) {
-    try {
-      const res = analyzeSessionTranscript(tf);
-      allFindings.push(...res.findings);
-      structuredEditCalls += res.structuredEditCalls;
-      shellMutationCalls += res.shellMutationCalls;
-      readOnlyPythonOrSedCount += res.readOnlyPythonOrSedCount;
-      jsonlPrefixCollisionCount += res.jsonlPrefixCollisionCount;
-      docManifestFilteredCount += res.docManifestFilteredCount;
-      sameTargetOverlapCount += res.sameTargetOverlapCount;
-      totalErrors += res.totalErrors;
-      consecutiveErrorStreaks += res.consecutiveErrorStreaks;
-      if (res.maxErrorStreak > maxErrorStreak) maxErrorStreak = res.maxErrorStreak;
-      cwdEscapeCount += res.cwdEscapeCount;
-      for (const item of res.thrashedFiles) {
-        allThrashedFiles.push({ session: path.basename(tf), ...item });
-      }
-    } catch {
-      // ignore unreadable transcript
-    }
-  }
-
-  if (shellMutationCalls > 0) {
-    const pct = Math.round((shellMutationCalls / Math.max(1, structuredEditCalls + shellMutationCalls)) * 1000) / 10;
-    allFindings.push({
-      ruleId: "LPB004",
-      plane: "thrash",
-      severity: "MEDIUM",
-      file: "session-transcripts",
-      detail: `${shellMutationCalls} source file mutation(s) (${pct}% of all writes) executed via shell heredoc/sed/.write_text, bypassing structured Edit hooks`,
-      evidence: `${shellMutationCalls} shell writes vs ${structuredEditCalls} Edit/Write/apply_patch calls`
-    });
-  }
-
-  if (readOnlyPythonOrSedCount > 0) {
-    allFindings.push({
-      ruleId: "LPB006",
-      plane: "thrash",
-      severity: "INFO",
-      file: "session-transcripts",
-      detail: `${readOnlyPythonOrSedCount} read-only python3 -c / sed -n code inspections separated from true file mutations`,
-      evidence: `${readOnlyPythonOrSedCount} read-only inspections excluded`
-    });
-  }
-
-  if (jsonlPrefixCollisionCount > 0 || docManifestFilteredCount > 0) {
-    allFindings.push({
-      ruleId: "LPB007",
-      plane: "thrash",
-      severity: "INFO",
-      file: "session-transcripts",
-      detail: `${jsonlPrefixCollisionCount} .jsonl-vs-.js prefix collision(s) and ${docManifestFilteredCount} doc/manifest edit(s) excluded from source thrash counts`,
-      evidence: `${jsonlPrefixCollisionCount} .jsonl collisions, ${docManifestFilteredCount} doc/manifest updates`
-    });
-  }
-
-  if (maxErrorStreak >= 4) {
-    allFindings.push({
-      ruleId: "LPB008",
-      plane: "loop",
-      severity: "CRITICAL",
-      file: "session-transcripts",
-      detail: `longest streak of ${maxErrorStreak} consecutive failing tool calls across all sessions`,
-      evidence: `${maxErrorStreak} consecutive failures`
-    });
-  } else if (maxErrorStreak >= 2) {
-    allFindings.push({
-      ruleId: "LPB009",
-      plane: "loop",
-      severity: "HIGH",
-      file: "session-transcripts",
-      detail: `longest streak of ${maxErrorStreak} consecutive failing tool calls across all sessions`,
-      evidence: `${maxErrorStreak} consecutive failures`
-    });
-  }
-
-  const ruleCounts = {};
-  const severityCounts = { CRITICAL: 0, HIGH: 0, MEDIUM: 0, LOW: 0, INFO: 0 };
-  for (const f of allFindings) {
-    ruleCounts[f.ruleId] = (ruleCounts[f.ruleId] || 0) + 1;
-    severityCounts[f.severity] = (severityCounts[f.severity] || 0) + 1;
-  }
-
-  // Each rule carries a fixed penalty that saturates so one very noisy rule
-  // cannot drag a whole repo to zero on its own.
-  let penalty = 0;
-  for (const [ruleId, count] of Object.entries(ruleCounts)) {
-    const meta = RULE_META[ruleId];
-    if (!meta || meta.points === 0) continue;
-    penalty += Math.min(meta.points * 2, meta.points * Math.sqrt(count));
-  }
-
-  const score = Math.max(0, Math.min(100, Math.round(100 - penalty)));
-  const grade =
-    score >= 90 ? "A" : score >= 80 ? "B" : score >= 65 ? "C" : score >= 50 ? "D" : "F";
-
-  const totalWrites = structuredEditCalls + shellMutationCalls;
-  const shellBypassPct = totalWrites > 0 ? Math.round((shellMutationCalls / totalWrites) * 1000) / 10 : 0;
-
-  return {
-    sessionsScanned: transcriptFiles.length,
-    score,
-    grade,
-    severityCounts,
-    ruleCounts,
-    metrics: {
-      structuredEditCalls,
-      shellMutationCalls,
-      shellBypassPct,
-      readOnlyPythonOrSedCount,
-      jsonlPrefixCollisionCount,
-      docManifestFilteredCount,
-      sameTargetOverlapCount,
-      thrashedFileCount: allThrashedFiles.length,
-      totalErrors,
-      consecutiveErrorStreaks,
-      maxErrorStreak,
-      cwdEscapeCount
-    },
-    thrashedFiles: allThrashedFiles.sort((a, b) => b.edits - a.edits),
-    findings: allFindings
-  };
 }
