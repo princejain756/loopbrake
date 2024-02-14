@@ -13,6 +13,10 @@ function renderReport(report) {
   console.log(`doc/manifest edits excluded: ${metrics.docManifestFilteredCount}`);
   console.log(`failed tool calls: ${metrics.totalErrors} (longest streak ${metrics.maxErrorStreak})`);
   console.log(`deleted-sandbox cwd escapes: ${metrics.cwdEscapeCount}`);
+  console.log(`identical command retries: ${metrics.commandRetryLoops} (${metrics.wastedRetryCalls} wasted calls)`);
+  console.log(`empty write_stdin poll spins: ${metrics.emptyStdinPollSessions}`);
+  console.log(`unique tool calls: ${report.deduplicatedCalls}`);
+  console.log(`shell-write bypasses: ${metrics.shellMutationCalls} (${metrics.shellBypassPct}%)`);
   console.log('');
 
   if (thrashedFiles.length > 0) {
