@@ -1,7 +1,7 @@
 {
   "name": "loopbrake",
   "version": "0.1.0",
-  "description": "Zero-dependency edit-thrashing and shell-write bypass auditor for Claude Code transcripts.",
+  "description": "Zero-dependency edit-thrashing, shell-write bypass and tool-error doom-loop auditor for Claude Code and Codex CLI transcripts.",
   "type": "module",
   "bin": {
     "loopbrake": "./bin/loopbrake.mjs"
@@ -12,10 +12,13 @@
   },
   "keywords": [
     "claude-code",
+    "codex",
     "ai-agents",
+    "doom-loop",
     "edit-thrashing",
     "static-analysis",
     "llm-ops",
+    "developer-tools",
     "cli"
   ],
   "engines": {
