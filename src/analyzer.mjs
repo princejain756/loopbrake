@@ -32,6 +32,13 @@ export const RULE_META = {
     title: "Shell-Write Bypass of Structured Edit/apply_patch Tools (cat <<EOF / sed -i / .write_text)",
     points: 8
   },
+  LPB005: {
+    id: "LPB005",
+    plane: "thrash",
+    severity: "MEDIUM",
+    title: "Blind File Edit Invoked Before Any Read or Inspection of Target File",
+    points: 8
+  },
   LPB006: {
     id: "LPB006",
     plane: "thrash",
@@ -141,6 +148,7 @@ export function analyzeSessionTranscript(filePath) {
   let readOnlyPythonOrSedCount = 0;
   let jsonlPrefixCollisionCount = 0;
   let docManifestFilteredCount = 0;
+  let blindEditCount = 0;
   let sameTargetOverlapCount = 0;
   let totalErrors = 0;
   let consecutiveErrorStreaks = 0;
@@ -193,6 +201,9 @@ export function analyzeSessionTranscript(filePath) {
             continue;
           }
           structuredEditCalls++;
+          if (name !== "Write" && !readFiles.has(fp)) {
+            blindEditCount++;
+          }
           readFiles.add(fp);
           if (!fileMutations.has(fp)) fileMutations.set(fp, []);
           const edits =
@@ -302,6 +313,9 @@ export function analyzeSessionTranscript(filePath) {
         if (targets.length > 0) {
           structuredEditCalls++;
           for (const fp of targets) {
+            if (name === "apply_patch" && !readFiles.has(fp)) {
+              blindEditCount++;
+            }
             readFiles.add(fp);
             if (!fileMutations.has(fp)) fileMutations.set(fp, []);
             fileMutations.get(fp).push({
@@ -500,6 +514,7 @@ export function analyzeSessionTranscript(filePath) {
     readOnlyPythonOrSedCount,
     jsonlPrefixCollisionCount,
     docManifestFilteredCount,
+    blindEditCount,
     sameTargetOverlapCount,
     totalErrors,
     consecutiveErrorStreaks,
@@ -554,6 +569,7 @@ export function auditAgentLoops(options = {}) {
   let readOnlyPythonOrSedCount = 0;
   let jsonlPrefixCollisionCount = 0;
   let docManifestFilteredCount = 0;
+  let blindEditCount = 0;
   let sameTargetOverlapCount = 0;
   let totalErrors = 0;
   let consecutiveErrorStreaks = 0;
@@ -576,6 +592,7 @@ export function auditAgentLoops(options = {}) {
       readOnlyPythonOrSedCount += res.readOnlyPythonOrSedCount;
       jsonlPrefixCollisionCount += res.jsonlPrefixCollisionCount;
       docManifestFilteredCount += res.docManifestFilteredCount;
+      blindEditCount += res.blindEditCount;
       sameTargetOverlapCount += res.sameTargetOverlapCount;
       totalErrors += res.totalErrors;
       consecutiveErrorStreaks += res.consecutiveErrorStreaks;
@@ -602,6 +619,17 @@ export function auditAgentLoops(options = {}) {
       file: "session-transcripts",
       detail: `${shellMutationCalls} source file mutation(s) (${pct}% of all writes) executed via shell heredoc/sed/.write_text, bypassing structured Edit hooks`,
       evidence: `${shellMutationCalls} shell writes vs ${structuredEditCalls} Edit/Write/apply_patch calls`
+    });
+  }
+
+  if (blindEditCount > 0) {
+    allFindings.push({
+      ruleId: "LPB005",
+      plane: "thrash",
+      severity: "MEDIUM",
+      file: "session-transcripts",
+      detail: `${blindEditCount} Edit/apply_patch call(s) modified a source file before any Read/cat inspection in the session`,
+      evidence: `${blindEditCount} blind edits`
     });
   }
 
@@ -673,7 +701,8 @@ export function auditAgentLoops(options = {}) {
       readOnlyPythonOrSedCount,
       jsonlPrefixCollisionCount,
       docManifestFilteredCount,
-        sameTargetOverlapCount,
+      blindEditCount,
+      sameTargetOverlapCount,
       thrashedFileCount: allThrashedFiles.length,
       totalErrors,
       consecutiveErrorStreaks,
