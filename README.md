@@ -60,3 +60,9 @@ CRITICAL  LPB008  5f37b3d3.jsonl: 9 consecutive failing tool calls
 
 Shell-write parsing is heuristic. It recognises the common idioms (`>`, `tee`,
 `sed -i`, `perl -pi`, `cat <<EOF`, `.write_text(`, `open(..., 'w')`), but a helper
+binary or build script that rewrites sources without naming them on the command
+line will not be attributed to a file.
+
+## License
+
+MIT © [Prince Jain](https://github.com/princejain756)
