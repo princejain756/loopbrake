@@ -8,7 +8,8 @@
   },
   "main": "./src/analyzer.mjs",
   "scripts": {
-    "test": "node --test tests/loopbrake.test.mjs"
+    "test": "node --test tests/loopbrake.test.mjs",
+    "demo": "node ./bin/loopbrake.mjs --demo"
   },
   "keywords": [
     "claude-code",
