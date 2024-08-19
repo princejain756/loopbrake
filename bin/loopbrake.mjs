@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { auditAgentLoops, RULE_META } from '../src/analyzer.mjs';
+import { auditAgentLoops, getDemoResult, RULE_META } from '../src/analyzer.mjs';
 
 function renderReport(report) {
   const { findings, ruleCounts, thrashedFiles, metrics } = report;
@@ -47,9 +47,22 @@ function renderReport(report) {
 }
 
 function main() {
-  const targetPaths = process.argv.slice(2).filter((a) => !a.startsWith('-'));
-  const report = targetPaths.length > 0 ? auditAgentLoops(targetPaths) : auditAgentLoops();
-  renderReport(report);
+  const args = process.argv.slice(2);
+  const jsonMode = args.includes('--json');
+  const demoMode = args.includes('--demo');
+  const targetPaths = args.filter((a) => !a.startsWith('-'));
+
+  const report = demoMode
+    ? getDemoResult()
+    : targetPaths.length > 0
+      ? auditAgentLoops(targetPaths)
+      : auditAgentLoops();
+
+  if (jsonMode) {
+    console.log(JSON.stringify(report, null, 2));
+  } else {
+    renderReport(report);
+  }
 }
 
 main();
