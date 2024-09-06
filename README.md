@@ -30,6 +30,12 @@ node ./bin/loopbrake.mjs
 
 # Audit an explicit directory of .jsonl transcripts
 node ./bin/loopbrake.mjs ./logs
+
+# Run the bundled 153-session benchmark result
+node ./bin/loopbrake.mjs --demo
+
+# Machine-readable report for CI
+node ./bin/loopbrake.mjs ./logs --json
 ```
 
 Output is a loop-safety score, the thrashed-file table, and one line per finding
