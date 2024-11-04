@@ -812,3 +812,103 @@ if (targetFile) {
 
   return { hookScript, settingsSnippet };
 }
+
+export function getDemoResult() {
+  return {
+    sessionsScanned: 153,
+    deduplicatedCalls: 2581,
+    score: 21,
+    grade: "F",
+    severityCounts: {
+      CRITICAL: 10,
+      HIGH: 14,
+      MEDIUM: 25,
+      LOW: 15,
+      INFO: 3
+    },
+    ruleCounts: {
+      LPB001: 2,
+      LPB002: 3,
+      LPB003: 2,
+      LPB004: 1,
+      LPB005: 1,
+      LPB006: 1,
+      LPB007: 1,
+      LPB008: 6,
+      LPB009: 9,
+      LPB010: 2,
+      LPB011: 20,
+      LPB012: 3,
+      LPB013: 15,
+      LPB014: 1
+    },
+    metrics: {
+      structuredEditCalls: 121,
+      shellMutationCalls: 78,
+      shellBypassPct: 39.2,
+      readOnlyPythonOrSedCount: 570,
+      jsonlPrefixCollisionCount: 207,
+      docManifestFilteredCount: 11,
+      blindEditCount: 15,
+      sameTargetOverlapCount: 2,
+      thrashedFileCount: 5,
+      totalErrors: 178,
+      consecutiveErrorStreaks: 18,
+      maxErrorStreak: 9,
+      cwdEscapeCount: 2,
+      commandRetryLoops: 20,
+      wastedRetryCalls: 48,
+      emptyStdinPollSessions: 3,
+      duplicateSkillCalls: 27
+    },
+    thrashedFiles: [
+      { session: "rollout-01a1784f.jsonl", file: "fno.py", edits: 6, methods: ["apply_patch"] },
+      { session: "rollout-01a12a24.jsonl", file: "brain.py", edits: 4, methods: ["codex:exec"] },
+      { session: "rollout-01a12a24.jsonl", file: "test_backup_gdrive.py", edits: 3, methods: ["codex:exec"] },
+      { session: "rollout-01a1784f.jsonl", file: "test_fno_exit_telemetry.py", edits: 3, methods: ["apply_patch"] },
+      { session: "rollout-01a1784f.jsonl", file: "mcx.py", edits: 3, methods: ["apply_patch"] }
+    ],
+    findings: [
+      {
+        ruleId: "LPB008",
+        plane: "loop",
+        severity: "CRITICAL",
+        file: "5f37b3d3-3d5e-40bc-9890-dc7bb86b1a3b.jsonl",
+        detail: "9 consecutive failing tool calls in 5f37b3d3-3d5e-40bc-9890-dc7bb86b1a3b.jsonl (<tool_use_error>Unknown skill: pony tail. Did you mean ponytail?</tool_use_error>)",
+        evidence: "<tool_use_error>Unknown skill: pony tail. Did you mean ponytail?</tool_use_error>"
+      },
+      {
+        ruleId: "LPB001",
+        plane: "thrash",
+        severity: "CRITICAL",
+        file: "rollout-2026-10-26T18-34-25-01a1784f.jsonl",
+        detail: "fno.py mutated 6 times in rollout-2026-10-26T18-34-25-01a1784f.jsonl via apply_patch",
+        evidence: "fno.py: 6 mutations"
+      },
+      {
+        ruleId: "LPB001",
+        plane: "thrash",
+        severity: "CRITICAL",
+        file: "rollout-2026-10-11T14-16-47-01a12a24.jsonl",
+        detail: "brain.py mutated 4 times in rollout-2026-10-11T14-16-47-01a12a24.jsonl via codex:exec (shell-write bypass)",
+        evidence: "brain.py: 4 mutations"
+      },
+      {
+        ruleId: "LPB010",
+        plane: "loop",
+        severity: "CRITICAL",
+        file: "5f37b3d3-3d5e-40bc-9890-dc7bb86b1a3b.jsonl",
+        detail: "Deleted-sandbox CWD escape in 5f37b3d3-3d5e-40bc-9890-dc7bb86b1a3b.jsonl: shell recovered to ~ mid-session",
+        evidence: "Working directory was deleted; shell cwd recovered to ~"
+      },
+      {
+        ruleId: "LPB004",
+        plane: "thrash",
+        severity: "MEDIUM",
+        file: "session-transcripts",
+        detail: "78 source file mutation(s) (39.2% of all writes) executed via shell heredoc/sed/.write_text, bypassing structured Edit hooks",
+        evidence: "78 shell writes vs 121 Edit/Write/apply_patch calls"
+      }
+    ]
+  };
+}
