@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { auditAgentLoops, getDemoResult, RULE_META } from '../src/analyzer.mjs';
+import { auditAgentLoops, generateCircuitBreakerHook, getDemoResult, RULE_META } from '../src/analyzer.mjs';
 
 function renderReport(report) {
   const { findings, ruleCounts, thrashedFiles, metrics } = report;
@@ -51,6 +51,21 @@ function main() {
   const jsonMode = args.includes('--json');
   const demoMode = args.includes('--demo');
   const targetPaths = args.filter((a) => !a.startsWith('-'));
+
+  if (args.includes('--emit-hook')) {
+    const hook = generateCircuitBreakerHook();
+    if (jsonMode) {
+      console.log(JSON.stringify(hook, null, 2));
+    } else {
+      console.log('# Save to ~/.claude/hooks/loopbrake-hook.mjs and chmod +x');
+      console.log('');
+      console.log(hook.hookScript);
+      console.log('# Merge into .claude/settings.json');
+      console.log('');
+      console.log(JSON.stringify(hook.settingsSnippet, null, 2));
+    }
+    return;
+  }
 
   const report = demoMode
     ? getDemoResult()
