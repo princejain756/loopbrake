@@ -31,7 +31,7 @@ node ./bin/loopbrake.mjs
 # Audit an explicit directory of .jsonl transcripts
 node ./bin/loopbrake.mjs ./logs
 
-# Run the bundled 153-session benchmark result
+# Run the deterministic 153-session benchmark showcase
 node ./bin/loopbrake.mjs --demo
 
 # Machine-readable report for CI
@@ -61,14 +61,30 @@ CRITICAL  LPB008  5f37b3d3.jsonl: 9 consecutive failing tool calls
 | `LPB008` | `CRITICAL` | Loop | 4+ consecutive failing tool calls (severe doom loop) |
 | `LPB009` | `HIGH` | Loop | 2–3 consecutive failing tool calls |
 | `LPB010` | `CRITICAL` | Loop | Deleted-sandbox CWD escape recovering the shell into `~` |
+| `LPB011` | `MEDIUM` | Loop | Identical shell command retried 3+ times back-to-back |
+| `LPB012` | `MEDIUM` | Loop | 3+ empty `write_stdin` polls in one session |
+| `LPB013` | `LOW` | Loop | Duplicate `Skill` re-invocation in the same session |
+| `LPB014` | `INFO` | Guard | Streaming `tool_use.id` / `call_id` progress rows deduplicated |
 
-## Limitations
+## 153-Session Benchmark (`~/.claude/projects` + `~/.codex/sessions`)
 
-Shell-write parsing is heuristic. It recognises the common idioms (`>`, `tee`,
-`sed -i`, `perl -pi`, `cat <<EOF`, `.write_text(`, `open(..., 'w')`), but a helper
-binary or build script that rewrites sources without naming them on the command
-line will not be attributed to a file.
+The `--demo` dataset is baked into the source, so the numbers reproduce without
+your own transcripts:
 
-## License
+| Metric | Measured Value |
+| :--- | ---: |
+| Sessions scanned | `153` |
+| Unique deduplicated tool calls | `2,581` |
+| Structured file mutations (`Edit` / `Write` / `apply_patch`) | `121` |
+| Shell-write bypasses (`Bash` / `codex:exec`) | `78` (`39.2%` of writes) |
+| Source files thrashed (`>= 3` mutations in one session) | `5` |
+| Read-only `python3 -c` / `sed -n` inspections filtered | `570` |
+| Total failed tool calls / consecutive streaks | `178` / `18` |
 
-MIT © [Prince Jain](https://github.com/princejain756)
+## Installing the live circuit-breaker hook (`--emit-hook`)
+
+Run `node ./bin/loopbrake.mjs --emit-hook` to print
+`~/.claude/hooks/loopbrake-hook.mjs` and the matching `.claude/settings.json`
+configuration. Unlike a basic `Edit`-only counter, the generated hook inspects
+both structured `Edit`/`MultiEdit`/`Write` calls **and** `Bash` write operators
+(`sed -i`, `cat <<`, `.write_text(`), tracks `PostToolUse` error streaks, and exits
