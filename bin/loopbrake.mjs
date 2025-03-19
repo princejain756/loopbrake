@@ -128,3 +128,62 @@ function renderReport(report) {
   }
   console.log(`  ${COLORS.dim}${line}${COLORS.reset}\n`);
 }
+
+function main() {
+  const args = process.argv.slice(2);
+  if (args.includes('-h') || args.includes('--help')) {
+    printHelp();
+    process.exit(0);
+  }
+  if (args.includes('-v') || args.includes('--version')) {
+    console.log('0.1.0');
+    process.exit(0);
+  }
+
+  if (args.includes('--emit-hook')) {
+    const hook = generateCircuitBreakerHook();
+    if (args.includes('--json')) {
+      console.log(JSON.stringify(hook, null, 2));
+    } else {
+      console.log(`# Save to ~/.claude/hooks/loopbrake-hook.mjs and chmod +x:\n`);
+      console.log(hook.hookScript);
+      console.log(`# Merge into .claude/settings.json:\n`);
+      console.log(JSON.stringify(hook.settingsSnippet, null, 2));
+    }
+    process.exit(0);
+  }
+
+  const jsonMode = args.includes('--json');
+  const demoMode = args.includes('--demo');
+  let failOn = null;
+  const failIdx = args.indexOf('--fail-on');
+  if (failIdx !== -1 && args[failIdx + 1]) {
+    failOn = args[failIdx + 1].toUpperCase();
+  }
+
+  const targetPaths = args.filter(
+    (a, idx) => !a.startsWith('-') && (failIdx === -1 || idx !== failIdx + 1)
+  );
+
+  const report = demoMode
+    ? getDemoResult()
+    : targetPaths.length > 0
+      ? auditAgentLoops(targetPaths)
+      : auditAgentLoops();
+
+  if (jsonMode) {
+    console.log(JSON.stringify(report, null, 2));
+  } else {
+    renderReport(report);
+  }
+
+  if (failOn && SEV_RANK[failOn] !== undefined) {
+    const threshold = SEV_RANK[failOn];
+    const triggered = report.findings.some(
+      (f) => (SEV_RANK[String(f.severity).toUpperCase()] || 0) >= threshold
+    );
+    if (triggered) process.exit(1);
+  }
+}
+
+main();
