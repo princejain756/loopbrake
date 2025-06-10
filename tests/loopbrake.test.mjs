@@ -9,30 +9,51 @@ function makeTempDir() {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'loopbrake-test-'));
 }
 
-test('1. Detects same-file edit thrashing (LPB001)', () => {
-  const tmp = makeTempDir();
-  const logPath = path.join(tmp, 'session-thrash.jsonl');
-  const rows = [1, 2, 3, 4, 5].map((i) => ({
+function writeSession(dir, name, rows) {
+  const p = path.join(dir, name);
+  fs.writeFileSync(p, rows.map((r) => JSON.stringify(r)).join('\n'));
+  return p;
+}
+
+function editRow(id, file, oldStr, newStr) {
+  return {
     type: 'assistant',
     message: {
-      id: `msg_fno_${i}`,
+      id: `msg_${id}`,
       content: [
         {
           type: 'tool_use',
-          id: `tu_fno_${i}`,
+          id,
           name: 'Edit',
-          input: {
-            file_path: '/repo/src/fno.py',
-            old_string: `line_${i}`,
-            new_string: `line_patched_${i}`
-          }
+          input: { file_path: file, old_string: oldStr, new_string: newStr }
         }
       ]
     }
-  }));
-  fs.writeFileSync(logPath, rows.map((r) => JSON.stringify(r)).join('\n'));
+  };
+}
+
+test('1. Detects same-file edit thrashing (LPB001) and band-aid patching (LPB002)', () => {
+  const tmp = makeTempDir();
+  writeSession(tmp, 'session-thrash.jsonl', [
+    ...[1, 2, 3, 4].map((i) => editRow(`tu_fno_${i}`, '/repo/src/fno.py', `line_${i}`, `line_patched_${i}`)),
+    ...[1, 2, 3].map((i) => editRow(`tu_mcx_${i}`, '/repo/src/mcx.py', `a_${i}`, `b_${i}`))
+  ]);
 
   const res = auditAgentLoops([tmp]);
   assert.ok(res.ruleCounts.LPB001 >= 1, 'Expected LPB001 critical edit thrash on fno.py');
-  assert.equal(res.metrics.thrashedFileCount, 1, 'Expected exactly one thrashed file');
+  assert.ok(res.ruleCounts.LPB002 >= 1, 'Expected LPB002 band-aid threshold on mcx.py');
+  assert.equal(res.metrics.thrashedFileCount, 2, 'Expected both files reported as thrashed');
+});
+
+test('2. Filters README.md and package.json churn out of thrash counts (LPB007)', () => {
+  const tmp = makeTempDir();
+  writeSession(tmp, 'session-docs.jsonl', [
+    ...[1, 2, 3, 4].map((i) => editRow(`tu_readme_${i}`, '/repo/README.md', `v${i}`, `v${i + 1}`)),
+    ...[1, 2, 3].map((i) => editRow(`tu_pkg_${i}`, '/repo/package.json', `"a": ${i}`, `"a": ${i + 1}`))
+  ]);
+
+  const res = auditAgentLoops([tmp]);
+  assert.equal(res.metrics.thrashedFileCount, 0, 'Docs and manifests must not be thrashed files');
+  assert.equal(res.metrics.docManifestFilteredCount, 7, 'Expected 7 doc/manifest edits filtered');
+  assert.ok(res.ruleCounts.LPB007 >= 1, 'Expected LPB007 doc/manifest filter summary');
 });
