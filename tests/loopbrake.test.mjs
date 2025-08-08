@@ -35,14 +35,28 @@ function editRow(id, file, oldStr, newStr) {
 test('1. Detects same-file edit thrashing (LPB001) and band-aid patching (LPB002)', () => {
   const tmp = makeTempDir();
   writeSession(tmp, 'session-thrash.jsonl', [
-    ...[1, 2, 3, 4].map((i) => editRow(`tu_fno_${i}`, '/repo/src/fno.py', `line_${i}`, `line_patched_${i}`)),
+    editRow(
+      'tu_fno_1',
+      '/repo/src/fno.py',
+      'const timeoutMs = 1000; // default timeout',
+      'const timeoutMs = 2500; // patched timeout value'
+    ),
+    editRow(
+      'tu_fno_2',
+      '/repo/src/fno.py',
+      'const timeoutMs = 2500; // patched timeout value',
+      'const timeoutMs = 5000; // second bandaid patch'
+    ),
+    ...[3, 4].map((i) => editRow(`tu_fno_${i}`, '/repo/src/fno.py', `line_${i}`, `line_patched_${i}`)),
     ...[1, 2, 3].map((i) => editRow(`tu_mcx_${i}`, '/repo/src/mcx.py', `a_${i}`, `b_${i}`))
   ]);
 
   const res = auditAgentLoops([tmp]);
   assert.ok(res.ruleCounts.LPB001 >= 1, 'Expected LPB001 critical edit thrash on fno.py');
   assert.ok(res.ruleCounts.LPB002 >= 1, 'Expected LPB002 band-aid threshold on mcx.py');
+  assert.ok(res.ruleCounts.LPB003 >= 1, 'Expected LPB003 overlapping hunk rewrite on fno.py');
   assert.equal(res.metrics.thrashedFileCount, 2, 'Expected both files reported as thrashed');
+  assert.ok(res.score < 100, 'Overlap and thrash findings must reduce the score');
 });
 
 test('2. Filters README.md and package.json churn out of thrash counts (LPB007)', () => {
