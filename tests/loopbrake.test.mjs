@@ -1,3 +1,4 @@
+// @ts-check
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -28,6 +29,16 @@ function editRow(id, file, oldStr, newStr) {
           input: { file_path: file, old_string: oldStr, new_string: newStr }
         }
       ]
+    }
+  };
+}
+
+function bashRow(id, command) {
+  return {
+    type: 'assistant',
+    message: {
+      id: `msg_${id}`,
+      content: [{ type: 'tool_use', id, name: 'Bash', input: { command } }]
     }
   };
 }
