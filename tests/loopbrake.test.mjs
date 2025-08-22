@@ -82,3 +82,28 @@ test('2. Filters README.md and package.json churn out of thrash counts (LPB007)'
   assert.equal(res.metrics.docManifestFilteredCount, 7, 'Expected 7 doc/manifest edits filtered');
   assert.ok(res.ruleCounts.LPB007 >= 1, 'Expected LPB007 doc/manifest filter summary');
 });
+
+test('3. Detects shell-write bypasses (LPB004) but not read-only python3 -c inspections (LPB006)', () => {
+  const tmp = makeTempDir();
+  writeSession(tmp, 'session-bypass.jsonl', [
+    ...[1, 2, 3, 4].map((i) =>
+      bashRow(`tu_sh_${i}`, `cat <<'EOF' > src/brain.py\nprint(${i})\nEOF`)
+    ),
+    bashRow(
+      'tu_ro_1',
+      `python3 -c "import json; print(open('submission.py').read()[:80]); rows=open('data/journal.jsonl').readlines()"`
+    )
+  ]);
+
+  const res = auditAgentLoops([tmp]);
+  assert.equal(res.metrics.shellMutationCalls, 4, 'Expected 4 shell-write bypasses');
+  assert.equal(res.metrics.shellBypassPct, 100, 'Every write in this session bypassed Edit');
+  assert.ok(res.ruleCounts.LPB004 >= 1, 'Expected LPB004 shell-bypass finding on brain.py');
+  assert.equal(res.metrics.readOnlyPythonOrSedCount, 1, 'Expected read-only python3 -c inspection filtered');
+  assert.ok(res.metrics.jsonlPrefixCollisionCount >= 1, 'Expected .jsonl vs .js prefix collision avoided');
+  assert.equal(
+    res.findings.find((f) => (f.ruleId === 'LPB001' || f.ruleId === 'LPB002') && f.detail.includes('submission.py')),
+    undefined,
+    'Read-only python3 -c inspection must not count as edit thrashing'
+  );
+});
