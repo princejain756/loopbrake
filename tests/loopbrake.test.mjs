@@ -43,6 +43,15 @@ function bashRow(id, command) {
   };
 }
 
+function resultRow(toolId, content, isError = false) {
+  return {
+    type: 'user',
+    message: {
+      content: [{ type: 'tool_result', tool_use_id: toolId, is_error: isError, content }]
+    }
+  };
+}
+
 test('1. Detects same-file edit thrashing (LPB001) and band-aid patching (LPB002)', () => {
   const tmp = makeTempDir();
   writeSession(tmp, 'session-thrash.jsonl', [
@@ -106,4 +115,37 @@ test('3. Detects shell-write bypasses (LPB004) but not read-only python3 -c insp
     undefined,
     'Read-only python3 -c inspection must not count as edit thrashing'
   );
+});
+
+test('4. Detects consecutive tool-error doom loops (LPB008) and deleted-sandbox CWD escape (LPB010)', () => {
+  const tmp = makeTempDir();
+  const rows = [];
+
+  for (let i = 1; i <= 9; i++) {
+    rows.push(bashRow(`tu_err_${i}`, `cat <<'EOF' > src/thing.py\nEOF`));
+    rows.push(
+      resultRow(
+        `tu_err_${i}`,
+        '<tool_use_error>Unknown skill: pony tail. Did you mean ponytail?</tool_use_error>',
+        true
+      )
+    );
+  }
+
+  // Deleted-sandbox CWD escape to the user home directory
+  rows.push(bashRow('tu_cwd_1', 'rg --files'));
+  rows.push(
+    resultRow(
+      'tu_cwd_1',
+      'Working directory "/private/tmp/worktree-99" was deleted; shell cwd recovered to /Users/princejain756',
+      true
+    )
+  );
+
+  writeSession(tmp, 'session-doom.jsonl', rows);
+
+  const res = auditAgentLoops([tmp]);
+  assert.ok(res.ruleCounts.LPB008 >= 1, 'Expected LPB008 critical consecutive tool-error doom loop');
+  assert.equal(res.metrics.maxErrorStreak, 10, 'Expected streak of 10 consecutive failed calls');
+  assert.ok(res.ruleCounts.LPB010 >= 1, 'Expected LPB010 deleted-sandbox CWD escape finding');
 });
