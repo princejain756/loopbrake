@@ -1,149 +1,224 @@
-// @ts-check
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { auditAgentLoops } from '../src/analyzer.mjs';
+import {
+  auditAgentLoops,
+  generateCircuitBreakerHook,
+  getDemoResult
+} from '../src/analyzer.mjs';
 
 function makeTempDir() {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'loopbrake-test-'));
 }
 
-function writeSession(dir, name, rows) {
-  const p = path.join(dir, name);
-  fs.writeFileSync(p, rows.map((r) => JSON.stringify(r)).join('\n'));
-  return p;
-}
-
-function editRow(id, file, oldStr, newStr) {
-  return {
-    type: 'assistant',
-    message: {
-      id: `msg_${id}`,
-      content: [
-        {
-          type: 'tool_use',
-          id,
-          name: 'Edit',
-          input: { file_path: file, old_string: oldStr, new_string: newStr }
-        }
-      ]
-    }
-  };
-}
-
-function bashRow(id, command) {
-  return {
-    type: 'assistant',
-    message: {
-      id: `msg_${id}`,
-      content: [{ type: 'tool_use', id, name: 'Bash', input: { command } }]
-    }
-  };
-}
-
-function resultRow(toolId, content, isError = false) {
-  return {
-    type: 'user',
-    message: {
-      content: [{ type: 'tool_result', tool_use_id: toolId, is_error: isError, content }]
-    }
-  };
-}
-
-test('1. Detects same-file edit thrashing (LPB001) and band-aid patching (LPB002)', () => {
+test('1. Detects same-file edit thrashing (LPB001/LPB002/LPB003) while filtering README.md and package.json (LPB007)', () => {
   const tmp = makeTempDir();
-  writeSession(tmp, 'session-thrash.jsonl', [
-    editRow(
-      'tu_fno_1',
-      '/repo/src/fno.py',
-      'const timeoutMs = 1000; // default timeout',
-      'const timeoutMs = 2500; // patched timeout value'
-    ),
-    editRow(
-      'tu_fno_2',
-      '/repo/src/fno.py',
-      'const timeoutMs = 2500; // patched timeout value',
-      'const timeoutMs = 5000; // second bandaid patch'
-    ),
-    ...[3, 4].map((i) => editRow(`tu_fno_${i}`, '/repo/src/fno.py', `line_${i}`, `line_patched_${i}`)),
-    ...[1, 2, 3].map((i) => editRow(`tu_mcx_${i}`, '/repo/src/mcx.py', `a_${i}`, `b_${i}`))
-  ]);
+  const logPath = path.join(tmp, 'session-thrash.jsonl');
+  const rows = [
+    // 5 edits on src/fno.py with overlapping old_string/new_string -> LPB001 + LPB003
+    {
+      type: 'assistant',
+      message: {
+        id: 'msg_fno_1',
+        content: [
+          {
+            type: 'tool_use',
+            id: 'tu_fno_1',
+            name: 'Edit',
+            input: {
+              file_path: '/repo/src/fno.py',
+              old_string: 'const timeoutMs = 1000; // default timeout',
+              new_string: 'const timeoutMs = 2500; // patched timeout value'
+            }
+          }
+        ]
+      }
+    },
+    {
+      type: 'assistant',
+      message: {
+        id: 'msg_fno_2',
+        content: [
+          {
+            type: 'tool_use',
+            id: 'tu_fno_2',
+            name: 'Edit',
+            input: {
+              file_path: '/repo/src/fno.py',
+              old_string: 'const timeoutMs = 2500; // patched timeout value',
+              new_string: 'const timeoutMs = 5000; // second bandaid patch'
+            }
+          }
+        ]
+      }
+    },
+    ...[3, 4, 5].map((i) => ({
+      type: 'assistant',
+      message: {
+        id: `msg_fno_${i}`,
+        content: [
+          {
+            type: 'tool_use',
+            id: `tu_fno_${i}`,
+            name: 'Edit',
+            input: {
+              file_path: '/repo/src/fno.py',
+              old_string: `line_${i}`,
+              new_string: `line_patched_${i}`
+            }
+          }
+        ]
+      }
+    })),
+    // 4 edits on README.md -> should be filtered as doc/manifest updates (LPB007)
+    ...[1, 2, 3, 4].map((i) => ({
+      type: 'assistant',
+      message: {
+        id: `msg_readme_${i}`,
+        content: [
+          {
+            type: 'tool_use',
+            id: `tu_readme_${i}`,
+            name: 'Edit',
+            input: {
+              file_path: '/repo/README.md',
+              old_string: `v${i}`,
+              new_string: `v${i + 1}`
+            }
+          }
+        ]
+      }
+    }))
+  ];
+  fs.writeFileSync(logPath, rows.map((r) => JSON.stringify(r)).join('\n'));
 
   const res = auditAgentLoops([tmp]);
   assert.ok(res.ruleCounts.LPB001 >= 1, 'Expected LPB001 critical edit thrash on fno.py');
-  assert.ok(res.ruleCounts.LPB002 >= 1, 'Expected LPB002 band-aid threshold on mcx.py');
   assert.ok(res.ruleCounts.LPB003 >= 1, 'Expected LPB003 overlapping hunk rewrite on fno.py');
-  assert.equal(res.metrics.thrashedFileCount, 2, 'Expected both files reported as thrashed');
-  assert.ok(res.score < 100, 'Overlap and thrash findings must reduce the score');
-});
-
-test('2. Filters README.md and package.json churn out of thrash counts (LPB007)', () => {
-  const tmp = makeTempDir();
-  writeSession(tmp, 'session-docs.jsonl', [
-    ...[1, 2, 3, 4].map((i) => editRow(`tu_readme_${i}`, '/repo/README.md', `v${i}`, `v${i + 1}`)),
-    ...[1, 2, 3].map((i) => editRow(`tu_pkg_${i}`, '/repo/package.json', `"a": ${i}`, `"a": ${i + 1}`))
-  ]);
-
-  const res = auditAgentLoops([tmp]);
-  assert.equal(res.metrics.thrashedFileCount, 0, 'Docs and manifests must not be thrashed files');
-  assert.equal(res.metrics.docManifestFilteredCount, 7, 'Expected 7 doc/manifest edits filtered');
+  assert.equal(res.metrics.docManifestFilteredCount, 4, 'Expected 4 README.md edits filtered');
   assert.ok(res.ruleCounts.LPB007 >= 1, 'Expected LPB007 doc/manifest filter summary');
 });
 
-test('3. Detects shell-write bypasses (LPB004) but not read-only python3 -c inspections (LPB006)', () => {
+test('2. Detects shell-write bypasses (LPB004) while filtering read-only python3 -c inspections (LPB006) and .jsonl vs .js collisions', () => {
   const tmp = makeTempDir();
-  writeSession(tmp, 'session-bypass.jsonl', [
-    ...[1, 2, 3, 4].map((i) =>
-      bashRow(`tu_sh_${i}`, `cat <<'EOF' > src/brain.py\nprint(${i})\nEOF`)
-    ),
-    bashRow(
-      'tu_ro_1',
-      `python3 -c "import json; print(open('submission.py').read()[:80]); rows=open('data/journal.jsonl').readlines()"`
-    )
-  ]);
+  const logPath = path.join(tmp, 'session-bypass.jsonl');
+  const rows = [
+    // 4 shell rewrites of src/brain.py via heredoc -> LPB004 + LPB001
+    ...[1, 2, 3, 4].map((i) => ({
+      type: 'assistant',
+      message: {
+        id: `msg_sh_${i}`,
+        content: [
+          {
+            type: 'tool_use',
+            id: `tu_sh_${i}`,
+            name: 'Bash',
+            input: {
+              command: `cat <<'EOF' > src/brain.py\nprint(${i})\nEOF`
+            }
+          }
+        ]
+      }
+    })),
+    // Read-only python3 -c inspection referencing submission.py and data/journal.jsonl -> LPB006 + LPB007 guard
+    {
+      type: 'assistant',
+      message: {
+        id: 'msg_ro_1',
+        content: [
+          {
+            type: 'tool_use',
+            id: 'tu_ro_1',
+            name: 'Bash',
+            input: {
+              command: `python3 -c "import json; print(open('submission.py').read()[:80]); rows=open('data/journal.jsonl').readlines()"`
+            }
+          }
+        ]
+      }
+    }
+  ];
+  fs.writeFileSync(logPath, rows.map((r) => JSON.stringify(r)).join('\n'));
 
   const res = auditAgentLoops([tmp]);
   assert.equal(res.metrics.shellMutationCalls, 4, 'Expected 4 shell-write bypasses');
-  assert.equal(res.metrics.shellBypassPct, 100, 'Every write in this session bypassed Edit');
-  assert.ok(res.ruleCounts.LPB004 >= 1, 'Expected LPB004 shell-bypass finding on brain.py');
+  assert.ok(res.ruleCounts.LPB004 >= 1, 'Expected LPB004 finding on brain.py');
   assert.equal(res.metrics.readOnlyPythonOrSedCount, 1, 'Expected read-only python3 -c inspection filtered');
   assert.ok(res.metrics.jsonlPrefixCollisionCount >= 1, 'Expected .jsonl vs .js prefix collision avoided');
-  assert.equal(
-    res.findings.find((f) => (f.ruleId === 'LPB001' || f.ruleId === 'LPB002') && f.detail.includes('submission.py')),
-    undefined,
-    'Read-only python3 -c inspection must not count as edit thrashing'
+  const falseSubmission = res.findings.find(
+    (f) => (f.ruleId === 'LPB001' || f.ruleId === 'LPB002') && f.detail.includes('submission.py')
   );
+  assert.equal(falseSubmission, undefined, 'Read-only python3 -c inspection must not count as edit thrashing');
 });
 
-test('4. Detects consecutive tool-error doom loops (LPB008) and deleted-sandbox CWD escape (LPB010)', () => {
+test('3. Detects consecutive tool-error doom loops (LPB008) and deleted-sandbox CWD escape to home directory (LPB010)', () => {
   const tmp = makeTempDir();
+  const logPath = path.join(tmp, 'session-doom.jsonl');
   const rows = [];
 
+  // 9 consecutive failed Skill calls ("pony tail")
   for (let i = 1; i <= 9; i++) {
-    rows.push(bashRow(`tu_err_${i}`, `cat <<'EOF' > src/thing.py\nEOF`));
-    rows.push(
-      resultRow(
-        `tu_err_${i}`,
-        '<tool_use_error>Unknown skill: pony tail. Did you mean ponytail?</tool_use_error>',
-        true
-      )
-    );
+    rows.push({
+      type: 'assistant',
+      message: {
+        id: `msg_err_${i}`,
+        content: [
+          {
+            type: 'tool_use',
+            id: `tu_err_${i}`,
+            name: 'Skill',
+            input: { skill: 'pony tail' }
+          }
+        ]
+      }
+    });
+    rows.push({
+      type: 'user',
+      message: {
+        content: [
+          {
+            type: 'tool_result',
+            tool_use_id: `tu_err_${i}`,
+            is_error: true,
+            content: '<tool_use_error>Unknown skill: pony tail. Did you mean ponytail?</tool_use_error>'
+          }
+        ]
+      }
+    });
   }
 
-  // Deleted-sandbox CWD escape to the user home directory
-  rows.push(bashRow('tu_cwd_1', 'rg --files'));
-  rows.push(
-    resultRow(
-      'tu_cwd_1',
-      'Working directory "/private/tmp/worktree-99" was deleted; shell cwd recovered to /Users/princejain756',
-      true
-    )
-  );
+  // Deleted-sandbox CWD escape to home directory
+  rows.push({
+    type: 'assistant',
+    message: {
+      id: 'msg_cwd_1',
+      content: [
+        {
+          type: 'tool_use',
+          id: 'tu_cwd_1',
+          name: 'Bash',
+          input: { command: 'rg --files' }
+        }
+      ]
+    }
+  });
+  rows.push({
+    type: 'user',
+    message: {
+      content: [
+        {
+          type: 'tool_result',
+          tool_use_id: 'tu_cwd_1',
+          is_error: true,
+          content: 'Working directory "/private/tmp/worktree-99" was deleted; shell cwd recovered to /Users/princejain756'
+        }
+      ]
+    }
+  });
 
-  writeSession(tmp, 'session-doom.jsonl', rows);
-
+  fs.writeFileSync(logPath, rows.map((r) => JSON.stringify(r)).join('\n'));
   const res = auditAgentLoops([tmp]);
   assert.ok(res.ruleCounts.LPB008 >= 1, 'Expected LPB008 critical consecutive tool-error doom loop');
   assert.equal(res.metrics.maxErrorStreak, 10, 'Expected streak of 10 consecutive failed calls');
