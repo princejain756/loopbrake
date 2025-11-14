@@ -224,3 +224,50 @@ test('3. Detects consecutive tool-error doom loops (LPB008) and deleted-sandbox 
   assert.equal(res.metrics.maxErrorStreak, 10, 'Expected streak of 10 consecutive failed calls');
   assert.ok(res.ruleCounts.LPB010 >= 1, 'Expected LPB010 deleted-sandbox CWD escape finding');
 });
+
+test('4. Detects identical shell command retry loops (LPB011), empty write_stdin polling spin (LPB012), and deduplicates streaming tool_use ids (LPB014)', () => {
+  const tmp = makeTempDir();
+  const logPath = path.join(tmp, 'session-spin.jsonl');
+  const rows = [
+    // Duplicate streaming rows with identical tool_use id
+    {
+      type: 'assistant',
+      message: {
+        id: 'msg_dup',
+        content: [{ type: 'tool_use', id: 'tu_same_1', name: 'Bash', input: { command: 'pytest -q' } }]
+      }
+    },
+    {
+      type: 'assistant',
+      message: {
+        id: 'msg_dup',
+        content: [{ type: 'tool_use', id: 'tu_same_1', name: 'Bash', input: { command: 'pytest -q' } }]
+      }
+    },
+    // Identical command retried 3 more times
+    ...[2, 3, 4].map((i) => ({
+      type: 'assistant',
+      message: {
+        id: `msg_retry_${i}`,
+        content: [{ type: 'tool_use', id: `tu_same_${i}`, name: 'Bash', input: { command: 'pytest -q' } }]
+      }
+    })),
+    // 5 empty write_stdin polls
+    ...[1, 2, 3, 4, 5].map((i) => ({
+      type: 'response_item',
+      payload: {
+        type: 'function_call',
+        call_id: `call_poll_${i}`,
+        name: 'write_stdin',
+        arguments: JSON.stringify({ session_id: 11, chars: '' })
+      }
+    }))
+  ];
+
+  fs.writeFileSync(logPath, rows.map((r) => JSON.stringify(r)).join('\n'));
+  const res = auditAgentLoops([tmp]);
+  assert.equal(res.deduplicatedCalls, 9, 'Expected 9 unique calls after skipping 1 duplicate streaming row');
+  assert.ok(res.ruleCounts.LPB011 >= 1, 'Expected LPB011 identical command retry loop');
+  assert.ok(res.ruleCounts.LPB012 >= 1, 'Expected LPB012 empty write_stdin polling spin');
+  assert.ok(res.ruleCounts.LPB014 >= 1, 'Expected LPB014 deduplication info finding');
+});
