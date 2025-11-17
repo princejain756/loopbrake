@@ -271,3 +271,15 @@ test('4. Detects identical shell command retry loops (LPB011), empty write_stdin
   assert.ok(res.ruleCounts.LPB012 >= 1, 'Expected LPB012 empty write_stdin polling spin');
   assert.ok(res.ruleCounts.LPB014 >= 1, 'Expected LPB014 deduplication info finding');
 });
+
+test('5. Generates deterministic circuit-breaker hook and returns verified 153-session demo benchmark', () => {
+  const hook = generateCircuitBreakerHook();
+  assert.ok(hook.hookScript.includes('CIRCUIT BREAKER'));
+  assert.ok(hook.settingsSnippet.hooks.PreToolUse.length > 0);
+  assert.ok(hook.settingsSnippet.hooks.PostToolUse.length > 0);
+
+  const demo = getDemoResult();
+  assert.equal(demo.sessionsScanned, 153);
+  assert.equal(demo.metrics.shellBypassPct, 39.2);
+  assert.equal(demo.metrics.maxErrorStreak, 9);
+});
