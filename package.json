@@ -1,0 +1,41 @@
+{
+  "name": "loopbrake",
+  "version": "0.1.0",
+  "description": "Zero-dependency edit-thrashing, shell-write bypass, tool-error doom-loop, and deleted-sandbox CWD drift auditor + circuit-breaker hook generator for Claude Code and Codex CLI.",
+  "type": "module",
+  "bin": {
+    "loopbrake": "./bin/loopbrake.mjs"
+  },
+  "main": "./src/analyzer.mjs",
+  "files": [
+    "bin/",
+    "src/",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "test": "node --test tests/loopbrake.test.mjs",
+    "demo": "node ./bin/loopbrake.mjs --demo"
+  },
+  "keywords": [
+    "claude-code",
+    "codex",
+    "ai-agents",
+    "doom-loop",
+    "edit-thrashing",
+    "circuit-breaker",
+    "static-analysis",
+    "llm-ops",
+    "developer-tools",
+    "cli"
+  ],
+  "author": "Prince Jain <princejain756@gmail.com>",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/princejain756/loopbrake.git"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
